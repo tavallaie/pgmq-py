@@ -6,7 +6,7 @@ from multiprocessing import Process
 from typing import Optional
 import pandas as pd
 from sqlalchemy import create_engine, text
-from tembo_pgmq_python import PGMQueue
+from pgmq_py import PGMQueue
 from urllib.parse import urlparse
 import typer
 from benches.ops import consume, produce, queue_depth

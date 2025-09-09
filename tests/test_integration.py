@@ -1,6 +1,6 @@
 import unittest
 import time
-from tembo_pgmq_python import Message, PGMQueue, transaction
+from pgmq_py import Message, PGMQueue, transaction
 
 from datetime import datetime, timezone, timedelta
 
@@ -80,7 +80,7 @@ class BaseTestPGMQueue(unittest.TestCase):
 
     def test_archive_message(self):
         """Test archiving a message in the queue."""
-        msg_id = self.queue.send(self.test_queue, self.test_message)
+        self.queue.send(self.test_queue, self.test_message)
         message = self.queue.read(self.test_queue, vt=20)
         self.queue.archive(self.test_queue, message.msg_id)
         message = self.queue.read(self.test_queue, vt=20)
@@ -129,6 +129,7 @@ class BaseTestPGMQueue(unittest.TestCase):
         self.queue.create_queue(self.test_queue)
         self.queue.send(self.test_queue, self.test_message)
         stats = self.queue.metrics(self.test_queue)
+        self.assertGreaterEqual(len(stats), 1)
 
     def test_metrics_all(self):
         """Test getting metrics for all queues."""
@@ -292,8 +293,8 @@ class TestPGMQueueWithEnv(BaseTestPGMQueue):
         cls.test_message = {"hello": "world"}
         cls.queue.create_queue(cls.test_queue)
 
-class TestPGMQueueNoExtension:
 
+class TestPGMQueueNoExtension:
     @classmethod
     def setUpClass(cls):
         """Set up a connection to the PGMQueue without initializing the extension."""
@@ -317,13 +318,17 @@ class TestPGMQueueNoExtension:
 
     def test_no_create_extension_sql_sync(self):
         """Test that 'create extension' SQL is NOT executed for sync PGMQueue when init_extension is False."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
+
         with patch.object(PGMQueue, "_execute_query") as mock_execute_query:
-            queue = PGMQueue(init_extension=False)
+            PGMQueue(init_extension=False)
             # _execute_query should NOT be called with 'create extension' SQL
             for call in mock_execute_query.call_args_list:
                 args, kwargs = call
-                assert "create extension" not in str(args[0]), "Should not run create extension SQL"
+                assert "create extension" not in str(
+                    args[0]
+                ), "Should not run create extension SQL"
+
 
 if __name__ == "__main__":
     unittest.main()

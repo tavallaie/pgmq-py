@@ -1,5 +1,5 @@
 import time
-from tembo_pgmq_python import PGMQueue
+from pgmq_py import PGMQueue
 from locust import task, User
 
 

@@ -1,5 +1,5 @@
-from tembo_pgmq_python.queue import PGMQueue
-from tembo_pgmq_python.decorators import transaction
+from pgmq_py.queue import PGMQueue
+from pgmq_py.decorators import transaction
 
 queue = PGMQueue(
     host="localhost",

@@ -193,7 +193,7 @@ def queue_depth(
     database = connection_info["database"]
     url = f"postgresql://{username}:{password}@{host}:{port}/{database}"
     with psycopg.connect(url, autocommit=True) as conn:
-        pid = os.getpid()
+        # pid = os.getpid()
         cur = conn.cursor()
         conn.autocommit = True
         all_metrics = []

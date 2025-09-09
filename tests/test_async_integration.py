@@ -1,8 +1,8 @@
 import unittest
 import time
-from tembo_pgmq_python.messages import Message
-from tembo_pgmq_python.async_queue import PGMQueue
-from tembo_pgmq_python.decorators import async_transaction as transaction
+from pgmq_py.messages import Message
+from pgmq_py.async_queue import PGMQueue
+from pgmq_py.decorators import async_transaction as transaction
 from datetime import datetime, timezone, timedelta
 
 # Function to load environment variables
@@ -133,6 +133,7 @@ class BaseTestPGMQueue(unittest.IsolatedAsyncioTestCase):
         await self.queue.create_queue(self.test_queue)
         await self.queue.send(self.test_queue, self.test_message)
         stats = await self.queue.metrics(self.test_queue)
+        self.assertGreaterEqual(len(stats), 1)
 
     async def test_metrics_all(self):
         """Test getting metrics for all queues."""
