@@ -5,25 +5,25 @@
 Install with `pip` from pypi.org:
 
 ```bash
-pip install tembo-pgmq-python
+pip install pgmq-py
 ```
 
 To use the async version, install with the optional dependencies:
 
 ```bash
-pip install tembo-pgmq-python[async]
+pip install pgmq-py[async]
 ```
 
 Dependencies:
 
-- Postgres running the [Tembo PGMQ extension](https://github.com/tembo-io/tembo/tree/main/pgmq).
+- Postgres running the [PGMQ extension](https://github.com/pgmq/pgmq).
 
 ## Usage
 
 ### Start a Postgres Instance with the Tembo extension installed
 
 ```bash
-docker run -d --name postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 quay.io/tembo/pg17-pgmq:latest
+docker run -d --name pgmq-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/pgmq/pg17-pgmq:v1.5.1
 ```
 
 ### Using Environment Variables
