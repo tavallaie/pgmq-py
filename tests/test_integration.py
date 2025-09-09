@@ -72,7 +72,7 @@ class BaseTestPGMQueue(unittest.TestCase):
         msg_id = self.queue.send(self.test_queue, self.test_message, tz=timestamp)
         message = self.queue.read(self.test_queue, vt=20)
         self.assertIsNone(message, "Message should not be visible yet")
-        time.sleep(5)
+        time.sleep(6)
         message: Message = self.queue.read(self.test_queue, vt=20)
         self.assertIsNotNone(message, "Message should be visible after timestamp delay")
         self.assertEqual(message.message, self.test_message)
@@ -129,7 +129,8 @@ class BaseTestPGMQueue(unittest.TestCase):
         self.queue.create_queue(self.test_queue)
         self.queue.send(self.test_queue, self.test_message)
         stats = self.queue.metrics(self.test_queue)
-        self.assertGreaterEqual(len(stats), 1)
+        stats.total_messages
+        self.assertGreaterEqual(stats.total_messages, 1)
 
     def test_metrics_all(self):
         """Test getting metrics for all queues."""

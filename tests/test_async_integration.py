@@ -62,7 +62,7 @@ class BaseTestPGMQueue(unittest.IsolatedAsyncioTestCase):
         msg_id = await self.queue.send(self.test_queue, self.test_message, delay=5)
         message = await self.queue.read(self.test_queue, vt=20)
         self.assertIsNone(message, "Message should not be visible yet")
-        time.sleep(5)
+        time.sleep(6)
         message: Message = await self.queue.read(self.test_queue, vt=20)
         self.assertIsNotNone(message, "Message should be visible after delay")
         self.assertEqual(message.message, self.test_message)
@@ -133,7 +133,7 @@ class BaseTestPGMQueue(unittest.IsolatedAsyncioTestCase):
         await self.queue.create_queue(self.test_queue)
         await self.queue.send(self.test_queue, self.test_message)
         stats = await self.queue.metrics(self.test_queue)
-        self.assertGreaterEqual(len(stats), 1)
+        self.assertGreaterEqual(stats.total_messages, 1)
 
     async def test_metrics_all(self):
         """Test getting metrics for all queues."""
