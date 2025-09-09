@@ -1,0 +1,67 @@
+[project]
+name = "pgmq-py"
+version = "0.1.0"
+description = "Python client for the PGMQ Postgres extension."
+readme = "README.md"
+license = "PostgreSQL"
+requires-python = ">=3.9"
+keywords = ["pgmq", "postgres", "queue", "async", "messaging"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: PostgreSQL License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+
+
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+authors = [
+    { name = "Adam Hendel", email = "adam@tembo.io" },
+]
+
+maintainers = [
+    { name = "Adam Hendel", email = "adam@tembo.io" },
+    { name = "Ali Tavallaie", email = "ali@techbend.io" },
+]
+
+dependencies = [
+    "orjson>=3.11.3",
+    "psycopg[binary,pool]>=3.2.10",
+]
+
+[project.optional-dependencies]
+async = ["asyncpg>=0.30.0"]
+
+[dependency-groups]
+bench = [
+    "locust>=2.34.0",
+    "pandas>=2.3.2",
+    "pyyaml>=6.0.2",
+    "scipy>=1.13.1",
+    "sqlalchemy>=2.0.43",
+    "typer>=0.17.4",
+]
+dev = [
+    "pre-commit>=4.3.0",
+    "ruff>=0.12.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/pgmq/pgmq"
+Repository = "https://github.com/pgmq/pgmq-py"
+Documentation = "https://github.com/pgmq/pgmq-py"
+"Bug Tracker" = "https://github.com/pgmq/pgmq-py/issues"
+Changelog = "https://github.com/pgmq/pgmq-py/blob/main/CHANGELOG.md"
+
+
+[build-system]
+requires = ["uv_build>=0.8.15,<0.9.0"]
+build-backend = "uv_build"
