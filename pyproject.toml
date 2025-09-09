@@ -3,12 +3,12 @@ name = "pgmq-py"
 version = "0.1.0"
 description = "Python client for the PGMQ Postgres extension."
 readme = "README.md"
-license = "PostgreSQL"
+license = "Apache-2.0"
 requires-python = ">=3.9"
 keywords = ["pgmq", "postgres", "queue", "async", "messaging"]
 classifiers = [
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: PostgreSQL License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
