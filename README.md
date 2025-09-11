@@ -1,4 +1,4 @@
-# Tembo's Python Client for PGMQ
+# Python Client for [PGMQ](https://github.com/pgmq/pgmq)
 
 ## Installation
 
@@ -20,7 +20,7 @@ Dependencies:
 
 ## Usage
 
-### Start a Postgres Instance with the Tembo extension installed
+### Start a Postgres Instance with the PGMQ extension installed
 
 ```bash
 docker run -d --name pgmq-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/pgmq/pg17-pgmq:v1.5.1
