@@ -24,11 +24,11 @@ classifiers = [
 ]
 
 authors = [
-    { name = "Adam Hendel", email = "adam@tembo.io" },
+    { name = "Adam Hendel" },
 ]
 
 maintainers = [
-    { name = "Adam Hendel", email = "adam@tembo.io" },
+    { name = "Adam Hendel" },
     { name = "Ali Tavallaie", email = "ali@techbend.io" },
 ]
 
