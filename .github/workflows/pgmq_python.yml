@@ -1,9 +1,9 @@
-name: tembo-pgmq-python CI workflow
+name: pgmq-python CI workflow
 
 defaults:
   run:
     shell: bash
-    working-directory: tembo-pgmq-python
+    working-directory: ./
 
 on:
   pull_request:
@@ -11,32 +11,32 @@ on:
       - main
     paths:
       - ".github/workflows/pgmq_python.yml"
-      - "tembo-pgmq-python/tembo_pgmq_python/**"
-      - "tembo-pgmq-python/tests/**"
-      - "tembo-pgmq-python/pyproject.toml"
-      - "pgmq-extension/**"
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
   push:
     branches:
       - main
     paths:
       - ".github/workflows/pgmq_python.yml"
-      - "tembo-pgmq-python/tembo_pgmq_python/**"
-      - "tembo-pgmq-python/tests/**"
-      - "tembo-pgmq-python/pyproject.toml"
-      - "pgmq-extension/**"
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
 jobs:
   lints:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.11.0
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v6
         with:
           python-version: 3.11.0
-      - name: Install dependencies
-        run: |
-          curl -sSL https://install.python-poetry.org | POETRY_VERSION=1.7.1 python3 -
-          poetry install
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - name: Install project
+        run: uv sync --all-groups
       - name: Lints / Type Checking
         run: make lints
 
@@ -45,32 +45,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.11.0
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v6
         with:
           python-version: 3.11.0
-      - name: Install dependencies
-        run: |
-          curl -sSL https://install.python-poetry.org | POETRY_VERSION=1.7.1 python3 -
-          poetry install --extras "async"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - name: Install project
+        run: uv sync --all-groups
       - name: Unit and Integration Tests
         run: make test
 
   publish:
     runs-on: ubuntu-latest
     # only publish off main branch
-    if: github.repository == 'tembo-io/pgmq' && github.ref == 'refs/heads/main'
+    if: github.repository == 'pgmq/pgmq-py' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.11.0
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v6
         with:
           python-version: 3.11.0
-      - name: Install dependencies
-        run: |
-          curl -sSL https://install.python-poetry.org | POETRY_VERSION=1.7.1 python3 -
-          poetry install
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - name: Install project
+        run: uv sync --all-groups
       - name: Publish
         env:
           POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_TOKEN }}
         run: |
-          poetry publish --build --skip-existing
+          uv publish
