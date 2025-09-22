@@ -1,4 +1,4 @@
-SCOPE=pgmq-py/
+SCOPE=src/
 
 .PHONY: format lint test clear-postgres run-pgmq-postgres
 
@@ -15,7 +15,7 @@ clear-postgres:
 	docker rm -f pgmq-postgres || true
 
 run-pgmq-postgres:
-	docker run -d --name pgmq-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 quay.io/tembo/pg17-pgmq:latest
+	docker run -d --name pgmq-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/pgmq/pg17-pgmq:latest
 
 test: clear-postgres run-pgmq-postgres
 	sleep 10  # Give PostgreSQL time to start

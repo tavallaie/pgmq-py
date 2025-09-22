@@ -236,7 +236,6 @@ if __name__ == "__main__":
     # example usage (remove `poetry run`) if not using poetry to manage the environment
     # 10 processes each writing 1 message at a time, as fast as possible for 60 seconds
     # 10 processes, each reading->deleting up to 10 messages at a time, until all messages consumed
-    # excecute from pgmq/tembo-pgmq-python
     #
     # poetry run python -m benches.bench 'postgresql://$USER:$PASSWORD@$HOST:$PORT/$DATABASE' 60 \
     #   --write-concurrency=10 \
