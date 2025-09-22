@@ -1,5 +1,5 @@
 [project]
-name = "pgmq-py"
+name = "pgmq"
 version = "0.1.0"
 description = "Python client for the PGMQ Postgres extension."
 readme = "README.md"

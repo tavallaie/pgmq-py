@@ -1,6 +1,6 @@
 import asyncio
-from pgmq_py.async_queue import PGMQueue
-from pgmq_py.decorators import async_transaction as transaction
+from pgmq.async_queue import PGMQueue
+from pgmq.decorators import async_transaction as transaction
 
 
 async def main():

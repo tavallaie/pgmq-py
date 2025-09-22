@@ -1,6 +1,5 @@
 import json
 import logging
-import multiprocessing
 import os
 import time
 import psycopg
@@ -183,7 +182,7 @@ def consume(
 def queue_depth(
     queue_name: str,
     connection_info: dict,
-    kill_flag: multiprocessing.Value,
+    kill_flag,
     duration_seconds: int,
 ):
     username = connection_info["username"]

@@ -3,8 +3,8 @@ from typing import Optional, List, Union
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 import os
-from pgmq_py.messages import Message, QueueMetrics
-from pgmq_py.decorators import transaction
+from pgmq.messages import Message, QueueMetrics
+from pgmq.decorators import transaction
 import logging
 import datetime
 

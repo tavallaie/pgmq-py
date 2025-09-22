@@ -1,5 +1,5 @@
-from pgmq_py.queue import PGMQueue
-from pgmq_py.decorators import transaction
+from pgmq.queue import PGMQueue
+from pgmq.decorators import transaction
 
 queue = PGMQueue(
     host="localhost",

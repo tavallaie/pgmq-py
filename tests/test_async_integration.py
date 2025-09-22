@@ -1,8 +1,8 @@
 import unittest
 import time
-from pgmq_py.messages import Message
-from pgmq_py.async_queue import PGMQueue
-from pgmq_py.decorators import async_transaction as transaction
+from pgmq.messages import Message
+from pgmq.async_queue import PGMQueue
+from pgmq.decorators import async_transaction as transaction
 from datetime import datetime, timezone, timedelta
 
 # Function to load environment variables

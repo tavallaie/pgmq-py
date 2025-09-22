@@ -1,6 +1,6 @@
 import unittest
 import time
-from pgmq_py import Message, PGMQueue, transaction
+from pgmq import Message, PGMQueue, transaction
 
 from datetime import datetime, timezone, timedelta
 
