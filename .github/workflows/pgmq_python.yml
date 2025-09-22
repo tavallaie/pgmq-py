@@ -26,15 +26,14 @@ jobs:
   lints:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python 3.11.0
-        uses: actions/setup-python@v6
-        with:
-          python-version: 3.11.0
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
+      - name: Install Python 3.13
+        run: uv python install 3.13
       - name: Install project
         run: uv sync --all-groups
       - name: Lints / Type Checking
@@ -43,15 +42,14 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python 3.11.0
-        uses: actions/setup-python@v6
-        with:
-          python-version: 3.11.0
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
+      - name: Install Python 3.13
+        run: uv python install 3.13
       - name: Install project
         run: uv sync --all-groups --all-extras
       - name: Unit and Integration Tests
@@ -61,20 +59,22 @@ jobs:
     runs-on: ubuntu-latest
     # only publish off main branch
     if: github.repository == 'pgmq/pgmq-py' && github.ref == 'refs/heads/main'
+    permissions:
+      id-token: write
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python 3.11.0
-        uses: actions/setup-python@v6
-        with:
-          python-version: 3.11.0
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
+      - name: Install Python 3.13
+        run: uv python install 3.13
       - name: Install project
         run: uv sync --all-groups
+
+      - name: build
+        run: uv build
       - name: Publish
-        env:
-          POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_TOKEN }}
-        run: |
-          uv publish
+        run: uv publish
