@@ -7,7 +7,7 @@ from scipy.ndimage import gaussian_filter1d
 from sqlalchemy import create_engine, text
 import numpy as np
 from benches.log import write_event_log
-from pgmq_py import PGMQueue
+from pgmq import PGMQueue
 
 
 def stack_events(

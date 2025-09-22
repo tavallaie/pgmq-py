@@ -9,8 +9,8 @@ from datetime import datetime
 
 from orjson import dumps, loads
 
-from pgmq_py.messages import Message, QueueMetrics
-from pgmq_py.decorators import async_transaction as transaction
+from pgmq.messages import Message, QueueMetrics
+from pgmq.decorators import async_transaction as transaction
 
 
 @dataclass

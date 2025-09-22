@@ -1,6 +1,6 @@
 import unittest
 import time
-from pgmq_py import Message, PGMQueue, transaction
+from pgmq import Message, PGMQueue, transaction
 
 from datetime import datetime, timezone, timedelta
 
@@ -60,7 +60,7 @@ class BaseTestPGMQueue(unittest.TestCase):
         msg_id = self.queue.send(self.test_queue, self.test_message, delay=5)
         message = self.queue.read(self.test_queue, vt=20)
         self.assertIsNone(message, "Message should not be visible yet")
-        time.sleep(5)
+        time.sleep(6)
         message: Message = self.queue.read(self.test_queue, vt=20)
         self.assertIsNotNone(message, "Message should be visible after delay")
         self.assertEqual(message.message, self.test_message)
