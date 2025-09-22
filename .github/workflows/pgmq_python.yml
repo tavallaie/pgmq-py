@@ -73,5 +73,8 @@ jobs:
         run: uv python install 3.13
       - name: Install project
         run: uv sync --all-groups
+
+      - name: build
+        run: uv build
       - name: Publish
         run: uv publish
