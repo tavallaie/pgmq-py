@@ -5,13 +5,13 @@
 Install with `pip` from pypi.org:
 
 ```bash
-pip install pgmq-py
+pip install pgmq
 ```
 
 To use the async version, install with the optional dependencies:
 
 ```bash
-pip install pgmq-py[async]
+pip install pgmq[async]
 ```
 
 Dependencies:
@@ -41,7 +41,7 @@ export PG_DATABASE=test_db
 Initialize a connection to Postgres using environment variables:
 
 ```python
-from pgmq_py import PGMQueue, Message
+from pgmq import PGMQueue, Message
 
 queue = PGMQueue()
 ```
@@ -51,7 +51,7 @@ queue = PGMQueue()
 Initialization for the async version requires an explicit call of the initializer:
 
 ```python
-from pgmq_py.async_queue import PGMQueue
+from pgmq.async_queue import PGMQueue
 
 async def main():
     queue = PGMQueue()
@@ -63,7 +63,7 @@ Then, the interface is exactly the same as the sync version.
 ### Initialize a connection to Postgres without environment variables
 
 ```python
-from pgmq_py import PGMQueue, Message
+from pgmq import PGMQueue, Message
 
 queue = PGMQueue(
     host="0.0.0.0",
@@ -260,13 +260,13 @@ queue = PGMQueue(
 
 # Using Transactions
 
-To perform multiple operations within a single transaction, use the `@transaction` decorator from the `pgmq_py.decorators` module. 
+To perform multiple operations within a single transaction, use the `@transaction` decorator from the `pgmq.decorators` module. 
 This ensures that all operations within the function are executed within the same transaction and are either committed together or rolled back if an error occurs.
 
 First, import the transaction decorator:
 
 ```python
-from pgmq_py.decorators import transaction
+from pgmq.decorators import transaction
 ```
 
 ### Example: Transactional Operation
