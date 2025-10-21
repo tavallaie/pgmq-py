@@ -6,7 +6,7 @@ import os
 from pgmq.messages import Message, QueueMetrics
 from pgmq.decorators import transaction
 import logging
-import datetime
+from datetime import datetime
 
 
 @dataclass
@@ -46,7 +46,7 @@ class PGMQueue:
         self.logger = logging.getLogger(__name__)
 
         if self.verbose:
-            log_filename = self.log_filename or datetime.datetime.now().strftime(
+            log_filename = self.log_filename or datetime.now().strftime(
                 "pgmq_debug_%Y%m%d_%H%M%S.log"
             )
             file_handler = logging.FileHandler(
