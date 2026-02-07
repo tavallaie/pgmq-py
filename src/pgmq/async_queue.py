@@ -355,7 +355,8 @@ class PGMQueue:
     async def _read_internal(self, queue, vt, batch_size, conn):
         self.logger.debug(f"Reading message from queue '{queue}' with vt={vt}")
         rows = await conn.fetch(
-            "SELECT * FROM pgmq.read(queue_name=>$1::text, vt=>$2::integer, qty=>$3::integer);",
+            """SELECT msg_id, read_ct, enqueued_at, vt, message
+            FROM pgmq.read(queue_name=>$1::text, vt=>$2::integer, qty=>$3::integer);""",
             queue,
             vt or self.vt,
             batch_size,
@@ -408,7 +409,7 @@ class PGMQueue:
             f"Reading batch of messages from queue '{queue}' with vt={vt}"
         )
         rows = await conn.fetch(
-            "SELECT * FROM pgmq.read(queue_name=>$1::text, vt=>$2::integer, qty=>$3::integer);",
+            "SELECT msg_id, read_ct, enqueued_at, vt, message FROM pgmq.read(queue_name=>$1::text, vt=>$2::integer, qty=>$3::integer);",
             queue,
             vt or self.vt,
             batch_size,
@@ -471,7 +472,7 @@ class PGMQueue:
     ):
         self.logger.debug(f"Reading messages with polling from queue '{queue}'")
         rows = await conn.fetch(
-            "SELECT * FROM pgmq.read_with_poll(queue_name=>$1, vt=>$2, qty=>$3, max_poll_seconds=>$4, poll_interval_ms=>$5);",
+            "SELECT msg_id, read_ct, enqueued_at, vt, message FROM pgmq.read_with_poll(queue_name=>$1, vt=>$2, qty=>$3, max_poll_seconds=>$4, poll_interval_ms=>$5);",
             queue,
             vt or self.vt,
             qty,
@@ -514,7 +515,10 @@ class PGMQueue:
 
     async def _pop_internal(self, queue, conn):
         self.logger.debug(f"Popping message from queue '{queue}'")
-        rows = await conn.fetch("SELECT * FROM pgmq.pop(queue_name=>$1);", queue)
+        rows = await conn.fetch(
+            "SELECT msg_id, read_ct, enqueued_at, vt, message FROM pgmq.pop(queue_name=>$1);",
+            queue,
+        )
         messages = [
             Message(
                 msg_id=row[0],
@@ -803,7 +807,7 @@ class PGMQueue:
             f"Setting VT for msg_id={msg_id} in queue '{queue}' to vt={vt}"
         )
         row = await conn.fetchrow(
-            "SELECT * FROM pgmq.set_vt(queue_name=>$1, msg_id=>$2, vt=>$3);",
+            "SELECT msg_id, read_ct, enqueued_at, vt, message FROM pgmq.set_vt(queue_name=>$1::text, msg_id=>$2::bigint, vt=>$3::integer);",
             queue,
             msg_id,
             vt,
