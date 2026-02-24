@@ -1,326 +1,492 @@
-# src/pgmq/queue.py (fixed sections)
+# src/pgmq/queue.py
+"""
+Synchronous PGMQ client implementation.
 
-from dataclasses import dataclass, field
-from typing import Optional, List, Union
+This module provides the main PGMQueue class for synchronous database operations,
+with full support for all PGMQ extension features including topics, FIFO, and notifications.
+"""
+
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any, Union
+from datetime import datetime
+
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-import os
-from pgmq.messages import Message, QueueMetrics
+
+from pgmq.base import BaseQueue
+from pgmq import _sql
 from pgmq.decorators import transaction
-from pgmq.logger import PGMQLogger, create_logger
+from pgmq.logger import log_with_context
+from pgmq.messages import (
+    Message,
+    QueueMetrics,
+    QueueRecord,
+    TopicBinding,
+    RoutingResult,
+    BatchTopicResult,
+    NotificationThrottle,
+)
 import logging
-from datetime import datetime
 
 
 @dataclass
-class PGMQueue:
-    """Base class for interacting with a queue"""
+class PGMQueue(BaseQueue):
+    """
+    Synchronous PGMQueue client for PostgreSQL Message Queue operations.
 
-    host: str = field(default_factory=lambda: os.getenv("PG_HOST", "localhost"))
-    port: str = field(default_factory=lambda: os.getenv("PG_PORT", "5432"))
-    database: str = field(default_factory=lambda: os.getenv("PG_DATABASE", "postgres"))
-    username: str = field(default_factory=lambda: os.getenv("PG_USERNAME", "postgres"))
-    password: str = field(default_factory=lambda: os.getenv("PG_PASSWORD", "postgres"))
-    delay: int = 0
-    vt: int = 30
-    pool_size: int = 10
-    kwargs: dict = field(default_factory=dict)
-    verbose: bool = False
-    log_filename: Optional[str] = None
-    init_extension: bool = True
-    # New logging options
-    structured_logging: bool = False
-    log_rotation: bool = False
-    log_rotation_size: str = "10 MB"
-    log_retention: str = "1 week"
+    Features:
+    - Standard queue operations (create, drop, send, read, archive)
+    - Topic-based message routing (publish/subscribe patterns)
+    - FIFO (First-In-First-Out) queues with message grouping
+    - PostgreSQL NOTIFY/LISTEN for real-time message notifications
+    - Batch operations for high throughput
+    - Message headers and metadata support
 
-    pool: ConnectionPool = field(init=False)
-    logger: logging.Logger = field(init=False)
+    Example:
+        >>> from pgmq import PGMQueue
+        >>> queue = PGMQueue(host="localhost", database="mydb")
+        >>> queue.create_queue("my_queue")
+        >>> msg_id = queue.send("my_queue", {"hello": "world"})
+        >>> msg = queue.read("my_queue", vt=30)
+    """
 
-    def __post_init__(self) -> None:
-        conninfo = f"""
-        host={self.host}
-        port={self.port}
-        dbname={self.database}
-        user={self.username}
-        password={self.password}
+    pool: ConnectionPool = None  # type: ignore
+
+    def __post_init__(self):
+        """Initialize connection pool after dataclass construction."""
+        super().__init__(config=self.config)
+        self._init_pool()
+        if self.config.init_extension:
+            self._init_extensions()
+
+    def _init_pool(self) -> None:
+        """Initialize the connection pool."""
+        log_with_context(self.logger, logging.DEBUG, "Creating connection pool")
+        self.pool = ConnectionPool(
+            self.config.dsn,
+            min_size=1,
+            max_size=self.config.pool_size,
+            open=True,
+        )
+
+    def _init_extensions(self) -> None:
+        """Ensure PGMQ extension is installed."""
+        with self.pool.connection() as conn:
+            conn.execute("CREATE EXTENSION IF NOT EXISTS pgmq CASCADE;")
+
+    # =========================================================================
+    # Connection Management
+    # =========================================================================
+
+    def _execute(self, sql: str, params: Optional[tuple] = None, conn=None) -> None:
+        """Execute SQL without returning results."""
+        if conn:
+            conn.execute(sql, params)
+        else:
+            with self.pool.connection() as c:
+                c.execute(sql, params)
+
+    def _execute_with_result(
+        self, sql: str, params: Optional[tuple] = None, conn=None
+    ) -> List[tuple]:
+        """Execute SQL and return all results."""
+        if conn:
+            return conn.execute(sql, params).fetchall()
+        else:
+            with self.pool.connection() as c:
+                return c.execute(sql, params).fetchall()
+
+    def _execute_one(
+        self, sql: str, params: Optional[tuple] = None, conn=None
+    ) -> Optional[tuple]:
+        """Execute SQL and return first result or None."""
+        results = self._execute_with_result(sql, params, conn)
+        return results[0] if results else None
+
+    # =========================================================================
+    # Queue Management
+    # =========================================================================
+
+    @transaction
+    def create_queue(self, queue: str, unlogged: bool = False, conn=None) -> None:
         """
-        self.kwargs.setdefault("max_size", self.pool_size)
-        self.pool = ConnectionPool(conninfo, open=True, **self.kwargs)
-        self._initialize_logging()
-        if self.init_extension:
-            self._initialize_extensions()
+        Create a new queue.
 
-    def _initialize_logging(self) -> None:
-        """Initialize logging using the centralized logger module."""
-        # Use create_logger for backward compatibility
-        self.logger = create_logger(
-            name=__name__, verbose=self.verbose, log_filename=self.log_filename
+        Args:
+            queue: Name of the queue (max 47 characters)
+            unlogged: Use unlogged table for higher performance but less durability
+        """
+        log_with_context(
+            self.logger, logging.DEBUG, "Creating queue", queue=queue, unlogged=unlogged
         )
-
-        # If enhanced features are needed, reconfigure with PGMQLogger
-        if self.structured_logging or self.log_rotation:
-            # Remove existing handlers to avoid duplicates
-            for handler in self.logger.handlers[:]:
-                self.logger.removeHandler(handler)
-
-            # Get enhanced logger
-            self.logger = PGMQLogger.get_logger(
-                name=__name__,
-                verbose=self.verbose,
-                log_filename=self.log_filename,
-                structured=self.structured_logging,
-                rotation=self.log_rotation_size if self.log_rotation else None,
-                retention=self.log_retention if self.log_rotation else None,
-            )
-
-    def _initialize_extensions(self, conn=None) -> None:
-        self._execute_query("create extension if not exists pgmq cascade;", conn=conn)
-
-    def _execute_query(
-        self, query: str, params: Optional[Union[List, tuple]] = None, conn=None
-    ) -> None:
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Executing query",
-            query=query,
-            params=params,
-            conn_id=id(conn) if conn else None,
-        )
-        if conn:
-            conn.execute(query, params)
-        else:
-            with self.pool.connection() as conn:
-                conn.execute(query, params)
-
-    def _execute_query_with_result(
-        self, query: str, params: Optional[Union[List, tuple]] = None, conn=None
-    ):
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Executing query with result",
-            query=query,
-            params=params,
-            conn_id=id(conn) if conn else None,
-        )
-        if conn:
-            return conn.execute(query, params).fetchall()
-        else:
-            with self.pool.connection() as conn:
-                return conn.execute(query, params).fetchall()
+        sql = _sql.CREATE_UNLOGGED_QUEUE if unlogged else _sql.CREATE_QUEUE
+        self._execute(sql, (queue,), conn=conn)
 
     @transaction
     def create_partitioned_queue(
         self,
         queue: str,
-        partition_interval: int = 10000,
-        retention_interval: int = 100000,
+        partition_interval: Union[int, str] = 10000,
+        retention_interval: Union[int, str] = 100000,
         conn=None,
     ) -> None:
-        """Create a new queue"""
-        PGMQLogger.log_with_context(
+        """
+        Create a partitioned queue (requires pg_partman extension).
+
+        Args:
+            queue: Queue name
+            partition_interval: Partition size (e.g., '10000' or '1 day')
+            retention_interval: Retention before deleting old partitions
+        """
+        log_with_context(
             self.logger,
             logging.DEBUG,
             "Creating partitioned queue",
             queue=queue,
-            partition_interval=partition_interval,
-            retention_interval=retention_interval,
+            partition_interval=str(partition_interval),
+            retention_interval=str(retention_interval),
         )
-        query = "select pgmq.create_partitioned(queue_name=>%s, partition_interval=>%s::text, retention_interval=>%s::text);"
-        params = [queue, partition_interval, retention_interval]
-        self._execute_query(query, params, conn=conn)
+        self._execute(
+            _sql.CREATE_PARTITIONED_QUEUE,
+            (queue, str(partition_interval), str(retention_interval)),
+            conn=conn,
+        )
 
     @transaction
-    def create_queue(self, queue: str, unlogged: bool = False, conn=None) -> None:
-        """Create a new queue."""
-        PGMQLogger.log_with_context(
-            self.logger, logging.DEBUG, "Creating queue", queue=queue, unlogged=unlogged
-        )
-        query = (
-            "select pgmq.create_unlogged(queue_name=>%s);"
-            if unlogged
-            else "select pgmq.create(queue_name=>%s);"
-        )
-        self._execute_query(query, [queue], conn=conn)
+    def drop_queue(self, queue: str, conn=None) -> bool:
+        """
+        Drop a queue and its archive table.
 
-    def validate_queue_name(self, queue_name: str, conn=None) -> None:
-        """Validate the length of a queue name."""
-        PGMQLogger.log_with_context(
-            self.logger, logging.DEBUG, "Validating queue name", queue_name=queue_name
-        )
-        query = "select pgmq.validate_queue_name(queue_name=>%s);"
-        self._execute_query(query, [queue_name], conn=conn)
+        Returns:
+            True if queue was dropped, False if it didn't exist
+        """
+        log_with_context(self.logger, logging.DEBUG, "Dropping queue", queue=queue)
+        result = self._execute_one(_sql.DROP_QUEUE, (queue,), conn=conn)
+        return result[0] if result else False
 
-    @transaction
-    def drop_queue(self, queue: str, partitioned: bool = False, conn=None) -> bool:
-        """Drop a queue."""
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Dropping queue",
-            queue=queue,
-            partitioned=partitioned,
-        )
-        query = "select pgmq.drop_queue(queue_name=>%s, partitioned=>%s);"
-        result = self._execute_query_with_result(query, [queue, partitioned], conn=conn)
-        return result[0][0]
+    def list_queues(self, conn=None) -> List[QueueRecord]:
+        """List all queues with their metadata."""
+        log_with_context(self.logger, logging.DEBUG, "Listing queues")
+        rows = self._execute_with_result(_sql.LIST_QUEUES, conn=conn)
+        return [QueueRecord.from_row(row) for row in rows]
 
-    @transaction
-    def list_queues(self, conn=None) -> List[str]:
-        """List all queues."""
-        PGMQLogger.log_with_context(self.logger, logging.DEBUG, "Listing queues")
-        query = "select queue_name from pgmq.list_queues();"
-        rows = self._execute_query_with_result(query, conn=conn)
-        return [row[0] for row in rows]
+    def validate_queue_name(self, queue_name: str, conn=None) -> bool:
+        """
+        Validate that a queue name is valid.
+
+        Raises:
+            Exception: If validation fails (invalid format or too long)
+        """
+        try:
+            self._execute(_sql.VALIDATE_QUEUE_NAME, (queue_name,), conn=conn)
+            return True
+        except Exception:
+            return False
+
+    # =========================================================================
+    # Sending Messages
+    # =========================================================================
 
     @transaction
     def send(
-        self, queue: str, message: dict, delay: int = 0, tz: datetime = None, conn=None
+        self,
+        queue: str,
+        message: Dict[str, Any],
+        headers: Optional[Dict[str, Any]] = None,
+        delay: Union[int, datetime, None] = None,
+        conn=None,
     ) -> int:
-        """Send a message to a queue."""
-        PGMQLogger.log_with_context(
+        """
+        Send a single message to a queue.
+
+        Args:
+            queue: Target queue name
+            message: Message payload (must be JSON-serializable dict)
+            headers: Optional metadata headers
+            delay: Seconds (int) or future timestamp (datetime) for delayed visibility
+
+        Returns:
+            Message ID (bigint)
+        """
+        log_with_context(
             self.logger,
             logging.DEBUG,
             "Sending message",
             queue=queue,
-            delay=delay,
-            has_tz=tz is not None,
+            has_headers=headers is not None,
+            has_delay=delay is not None,
         )
 
-        result = None
-        if delay:
-            query = "select * from pgmq.send(queue_name=>%s::text, msg=>%s::jsonb, delay=>%s::integer);"
-            result = self._execute_query_with_result(
-                query, [queue, Jsonb(message), delay], conn=conn
-            )
-        elif tz:
-            query = "select * from pgmq.send(queue_name=>%s::text, msg=>%s::jsonb, delay=>%s::timestamptz);"
-            result = self._execute_query_with_result(
-                query, [queue, Jsonb(message), tz], conn=conn
-            )
-        else:
-            query = "select * from pgmq.send(queue_name=>%s::text, msg=>%s::jsonb);"
-            result = self._execute_query_with_result(
-                query, [queue, Jsonb(message)], conn=conn
-            )
+        has_headers = headers is not None
+        has_delay = delay is not None
+        delay_is_ts = isinstance(delay, datetime)
 
-        # Log success with context
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Message sent successfully",
-            queue=queue,
-            msg_id=result[0][0],
-        )
-        return result[0][0]
+        sql = _sql.get_send_sql(has_headers, has_delay, delay_is_ts)
+
+        # Build parameters
+        params: List[Any] = [queue, Jsonb(message)]
+        if has_headers:
+            params.append(Jsonb(headers))
+        if has_delay:
+            params.append(delay)
+
+        result = self._execute_one(sql, tuple(params), conn=conn)
+        return result[0] if result else -1
 
     @transaction
     def send_batch(
         self,
         queue: str,
-        messages: List[dict],
-        delay: int = 0,
-        tz: datetime = None,
+        messages: List[Dict[str, Any]],
+        headers: Optional[List[Dict[str, Any]]] = None,
+        delay: Union[int, datetime, None] = None,
         conn=None,
     ) -> List[int]:
-        """Send a batch of messages to a queue."""
-        PGMQLogger.log_with_context(
+        """
+        Send multiple messages to a queue.
+
+        Args:
+            queue: Target queue name
+            messages: List of message payloads
+            headers: Optional list of headers (must match messages length)
+            delay: Delay for all messages in batch
+
+        Returns:
+            List of message IDs
+        """
+        log_with_context(
             self.logger,
             logging.DEBUG,
-            "Sending batch messages",
-            queue=queue,
-            batch_size=len(messages),
-            delay=delay,
-            has_tz=tz is not None,
-        )
-
-        result = None
-        if delay:
-            query = "select * from pgmq.send_batch(queue_name=>%s::text, msgs=>%s::jsonb[], delay=>%s::integer);"
-            params = [queue, [Jsonb(message) for message in messages], delay]
-            result = self._execute_query_with_result(query, params, conn=conn)
-        elif tz:
-            query = "select * from pgmq.send_batch(queue_name=>%s::text, msgs=>%s::jsonb[], delay=>%s::timestamptz);"
-            params = [queue, [Jsonb(message) for message in messages], tz]
-            result = self._execute_query_with_result(query, params, conn=conn)
-        else:
-            query = "select * from pgmq.send_batch(queue_name=>%s::text, msgs=>%s::jsonb[]);"
-            params = [queue, [Jsonb(message) for message in messages]]
-            result = self._execute_query_with_result(query, params, conn=conn)
-
-        msg_ids = [message[0] for message in result]
-        # Log success with context
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Batch messages sent successfully",
-            queue=queue,
-            msg_ids=msg_ids,
-            count=len(msg_ids),
-        )
-        return msg_ids
-
-    @transaction
-    def read(
-        self, queue: str, vt: Optional[int] = None, conn=None
-    ) -> Optional[Message]:
-        """Read a message from a queue."""
-        PGMQLogger.log_with_context(
-            self.logger, logging.DEBUG, "Reading message", queue=queue, vt=vt or self.vt
-        )
-        query = "select msg_id, read_ct, enqueued_at, vt, message from pgmq.read(queue_name=>%s::text, vt=>%s::integer, qty=>%s::integer);"
-        rows = self._execute_query_with_result(
-            query, [queue, vt or self.vt, 1], conn=conn
-        )
-        messages = [
-            Message(msg_id=x[0], read_ct=x[1], enqueued_at=x[2], vt=x[3], message=x[4])
-            for x in rows
-        ]
-
-        result = messages[0] if messages else None
-        # Log result with context
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Message read completed",
-            queue=queue,
-            msg_id=result.msg_id if result else None,
-            has_message=result is not None,
-        )
-        return result
-
-    @transaction
-    def read_batch(
-        self, queue: str, vt: Optional[int] = None, batch_size=1, conn=None
-    ) -> Optional[List[Message]]:
-        """Read a batch of messages from a queue."""
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Reading batch messages",
-            queue=queue,
-            vt=vt or self.vt,
-            batch_size=batch_size,
-        )
-        query = "select msg_id, read_ct, enqueued_at, vt, message from pgmq.read(queue_name=>%s::text, vt=>%s::integer, qty=>%s::integer);"
-        rows = self._execute_query_with_result(
-            query, [queue, vt or self.vt, batch_size], conn=conn
-        )
-        messages = [
-            Message(msg_id=x[0], read_ct=x[1], enqueued_at=x[2], vt=x[3], message=x[4])
-            for x in rows
-        ]
-
-        # Log result with context
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Batch messages read completed",
+            "Sending batch",
             queue=queue,
             count=len(messages),
         )
+
+        if not messages:
+            return []
+
+        if headers is not None and len(headers) != len(messages):
+            raise ValueError("headers list must match messages list length")
+
+        has_headers = headers is not None
+        has_delay = delay is not None
+        delay_is_ts = isinstance(delay, datetime)
+
+        sql = _sql.get_send_batch_sql(has_headers, has_delay, delay_is_ts)
+
+        # Build parameters
+        jsonb_messages = [Jsonb(m) for m in messages]
+        params: List[Any] = [queue, jsonb_messages]
+
+        if has_headers:
+            params.append([Jsonb(h) for h in headers])
+        if has_delay:
+            params.append(delay)
+
+        rows = self._execute_with_result(sql, tuple(params), conn=conn)
+        return [row[0] for row in rows]
+
+    # =========================================================================
+    # Topic-Based Routing
+    # =========================================================================
+
+    @transaction
+    def send_topic(
+        self,
+        routing_key: str,
+        message: Dict[str, Any],
+        headers: Optional[Dict[str, Any]] = None,
+        delay: Optional[int] = None,
+        conn=None,
+    ) -> int:
+        """
+        Send message to all queues matching the routing key pattern.
+
+        Args:
+            routing_key: Dot-separated routing key (e.g., 'logs.api.error')
+            message: Message payload
+            headers: Optional headers
+            delay: Seconds before message becomes visible
+
+        Returns:
+            Number of queues that received the message
+        """
+        log_with_context(
+            self.logger,
+            logging.DEBUG,
+            "Sending topic message",
+            routing_key=routing_key,
+            has_headers=headers is not None,
+        )
+
+        has_headers = headers is not None
+        has_delay = delay is not None
+
+        sql = _sql.get_send_topic_sql(has_headers, has_delay)
+
+        params: List[Any] = [routing_key, Jsonb(message)]
+        if has_headers:
+            params.append(Jsonb(headers))
+        if has_delay:
+            params.append(delay)
+
+        result = self._execute_one(sql, tuple(params), conn=conn)
+        return result[0] if result else 0
+
+    @transaction
+    def send_batch_topic(
+        self,
+        routing_key: str,
+        messages: List[Dict[str, Any]],
+        headers: Optional[List[Dict[str, Any]]] = None,
+        delay: Union[int, datetime, None] = None,
+        conn=None,
+    ) -> List[BatchTopicResult]:
+        """
+        Send batch of messages to all matching queues.
+
+        Returns:
+            List of results showing which queue received which message ID
+        """
+        log_with_context(
+            self.logger,
+            logging.DEBUG,
+            "Sending batch topic",
+            routing_key=routing_key,
+            count=len(messages),
+        )
+
+        if not messages:
+            return []
+
+        has_headers = headers is not None
+        has_delay = delay is not None
+        delay_is_ts = isinstance(delay, datetime)
+
+        sql = _sql.get_send_batch_topic_sql(has_headers, has_delay, delay_is_ts)
+
+        jsonb_messages = [Jsonb(m) for m in messages]
+        params: List[Any] = [routing_key, jsonb_messages]
+
+        if has_headers:
+            if len(headers) != len(messages):
+                raise ValueError("headers list must match messages list length")
+            params.append([Jsonb(h) for h in headers])
+        if has_delay:
+            params.append(delay)
+
+        rows = self._execute_with_result(sql, tuple(params), conn=conn)
+        return [BatchTopicResult.from_row(row) for row in rows]
+
+    @transaction
+    def bind_topic(self, pattern: str, queue_name: str, conn=None) -> None:
+        """
+        Bind a pattern to a queue for topic routing.
+
+        Patterns:
+            * matches exactly one segment (logs.* matches logs.error)
+            # matches zero or more segments (logs.# matches logs.a.b.error)
+        """
+        log_with_context(
+            self.logger,
+            logging.DEBUG,
+            "Binding topic",
+            pattern=pattern,
+            queue=queue_name,
+        )
+        self._execute(_sql.BIND_TOPIC, (pattern, queue_name), conn=conn)
+
+    @transaction
+    def unbind_topic(self, pattern: str, queue_name: str, conn=None) -> bool:
+        """
+        Remove a pattern binding from a queue.
+
+        Returns:
+            True if binding existed and was removed, False otherwise
+        """
+        log_with_context(
+            self.logger,
+            logging.DEBUG,
+            "Unbinding topic",
+            pattern=pattern,
+            queue=queue_name,
+        )
+        result = self._execute_one(_sql.UNBIND_TOPIC, (pattern, queue_name), conn=conn)
+        return result[0] if result else False
+
+    def list_topic_bindings(
+        self, queue_name: Optional[str] = None, conn=None
+    ) -> List[TopicBinding]:
+        """
+        List all topic bindings, optionally filtered by queue.
+        """
+        if queue_name:
+            rows = self._execute_with_result(
+                _sql.LIST_TOPIC_BINDINGS_FOR_QUEUE, (queue_name,), conn=conn
+            )
+        else:
+            rows = self._execute_with_result(_sql.LIST_TOPIC_BINDINGS, conn=conn)
+        return [TopicBinding.from_row(row) for row in rows]
+
+    def test_routing(self, routing_key: str, conn=None) -> List[RoutingResult]:
+        """
+        Test which queues would receive a message without actually sending.
+
+        Useful for debugging routing configurations.
+        """
+        rows = self._execute_with_result(_sql.TEST_ROUTING, (routing_key,), conn=conn)
+        return [RoutingResult.from_row(row) for row in rows]
+
+    # =========================================================================
+    # Reading Messages
+    # =========================================================================
+
+    @transaction
+    def read(
+        self,
+        queue: str,
+        vt: Optional[int] = None,
+        qty: int = 1,
+        conditional: Optional[Dict[str, Any]] = None,
+        conn=None,
+    ) -> Optional[Union[Message, List[Message]]]:
+        """
+        Read message(s) from queue with visibility timeout.
+
+        Args:
+            queue: Queue name
+            vt: Visibility timeout in seconds (default: self.vt)
+            qty: Number of messages to read (1 for single, >1 for batch)
+            conditional: JSON filter for message content (experimental)
+
+        Returns:
+            Single Message if qty=1 and message exists
+            List[Message] if qty>1
+            None if qty=1 and no message available
+        """
+        log_with_context(
+            self.logger,
+            logging.DEBUG,
+            "Reading messages",
+            queue=queue,
+            vt=vt or self.vt,
+            qty=qty,
+        )
+
+        actual_vt = vt or self.vt
+
+        if conditional:
+            sql = _sql.READ_CONDITIONAL
+            params = (queue, actual_vt, qty, Jsonb(conditional))
+        else:
+            sql = _sql.READ
+            params = (queue, actual_vt, qty)
+
+        rows = self._execute_with_result(sql, params, conn=conn)
+        messages = [Message.from_row(row, lambda x: x) for row in rows]
+
+        if qty == 1:
+            return messages[0] if messages else None
         return messages
 
     @transaction
@@ -331,268 +497,420 @@ class PGMQueue:
         qty: int = 1,
         max_poll_seconds: int = 5,
         poll_interval_ms: int = 100,
+        conditional: Optional[Dict[str, Any]] = None,
         conn=None,
-    ) -> Optional[List[Message]]:
-        """Read messages from a queue with polling."""
-        PGMQLogger.log_with_context(
+    ) -> List[Message]:
+        """
+        Read messages with long-polling.
+
+        Waits up to max_poll_seconds for messages to become available.
+        """
+        log_with_context(
             self.logger,
             logging.DEBUG,
-            "Reading messages with poll",
+            "Reading with poll",
             queue=queue,
-            vt=vt or self.vt,
             qty=qty,
             max_poll_seconds=max_poll_seconds,
-            poll_interval_ms=poll_interval_ms,
         )
-        query = "select msg_id, read_ct, enqueued_at, vt, message from pgmq.read_with_poll(queue_name=>%s::text, vt=>%s::integer, qty=>%s::integer, max_poll_seconds=>%s::integer, poll_interval_ms=>%s::integer);"
-        params = [queue, vt or self.vt, qty, max_poll_seconds, poll_interval_ms]
-        rows = self._execute_query_with_result(query, params, conn=conn)
-        messages = [
-            Message(msg_id=x[0], read_ct=x[1], enqueued_at=x[2], vt=x[3], message=x[4])
-            for x in rows
-        ]
 
-        # Log result with context
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Messages read with poll completed",
-            queue=queue,
-            count=len(messages),
-        )
-        return messages
+        actual_vt = vt or self.vt
+
+        if conditional:
+            sql = _sql.READ_WITH_POLL_CONDITIONAL
+            params = (
+                queue,
+                actual_vt,
+                qty,
+                max_poll_seconds,
+                poll_interval_ms,
+                Jsonb(conditional),
+            )
+        else:
+            sql = _sql.READ_WITH_POLL
+            params = (queue, actual_vt, qty, max_poll_seconds, poll_interval_ms)
+
+        rows = self._execute_with_result(sql, params, conn=conn)
+        return [Message.from_row(row, lambda x: x) for row in rows]
+
+    # =========================================================================
+    # FIFO Operations
+    # =========================================================================
 
     @transaction
-    def pop(self, queue: str, conn=None) -> Message:
-        """Pop a message from a queue."""
-        PGMQLogger.log_with_context(
-            self.logger, logging.DEBUG, "Popping message", queue=queue
-        )
-        query = "select msg_id, read_ct, enqueued_at, vt, message from pgmq.pop(queue_name=>%s);"
-        rows = self._execute_query_with_result(query, [queue], conn=conn)
-        messages = [
-            Message(msg_id=x[0], read_ct=x[1], enqueued_at=x[2], vt=x[3], message=x[4])
-            for x in rows
-        ]
+    def read_grouped(
+        self, queue: str, vt: Optional[int] = None, qty: int = 1, conn=None
+    ) -> List[Message]:
+        """
+        Read messages with FIFO grouping (SQS-style batch filling).
 
-        result = messages[0]
-        # Log result with context
-        PGMQLogger.log_with_context(
+        Attempts to fill batch from same message group first for throughput.
+        Messages with same 'x-pgmq-group' header are processed in order.
+        """
+        log_with_context(
             self.logger,
             logging.DEBUG,
-            "Message popped successfully",
+            "Reading grouped (SQS-style)",
             queue=queue,
-            msg_id=result.msg_id,
+            qty=qty,
         )
-        return result
+        params = (queue, vt or self.vt, qty)
+        rows = self._execute_with_result(_sql.READ_GROUPED, params, conn=conn)
+        return [Message.from_row(row, lambda x: x) for row in rows]
+
+    @transaction
+    def read_grouped_with_poll(
+        self,
+        queue: str,
+        vt: Optional[int] = None,
+        qty: int = 1,
+        max_poll_seconds: int = 5,
+        poll_interval_ms: int = 100,
+        conn=None,
+    ) -> List[Message]:
+        """FIFO grouped read with long-polling."""
+        log_with_context(
+            self.logger,
+            logging.DEBUG,
+            "Reading grouped with poll",
+            queue=queue,
+            qty=qty,
+        )
+        params = (queue, vt or self.vt, qty, max_poll_seconds, poll_interval_ms)
+        rows = self._execute_with_result(_sql.READ_GROUPED_WITH_POLL, params, conn=conn)
+        return [Message.from_row(row, lambda x: x) for row in rows]
+
+    @transaction
+    def read_grouped_rr(
+        self, queue: str, vt: Optional[int] = None, qty: int = 1, conn=None
+    ) -> List[Message]:
+        """
+        Read messages with FIFO round-robin interleaving.
+
+        Fairly distributes messages across different FIFO groups.
+        """
+        log_with_context(
+            self.logger,
+            logging.DEBUG,
+            "Reading grouped round-robin",
+            queue=queue,
+            qty=qty,
+        )
+        params = (queue, vt or self.vt, qty)
+        rows = self._execute_with_result(_sql.READ_GROUPED_RR, params, conn=conn)
+        return [Message.from_row(row, lambda x: x) for row in rows]
+
+    @transaction
+    def read_grouped_rr_with_poll(
+        self,
+        queue: str,
+        vt: Optional[int] = None,
+        qty: int = 1,
+        max_poll_seconds: int = 5,
+        poll_interval_ms: int = 100,
+        conn=None,
+    ) -> List[Message]:
+        """FIFO round-robin read with long-polling."""
+        log_with_context(
+            self.logger,
+            logging.DEBUG,
+            "Reading grouped RR with poll",
+            queue=queue,
+            qty=qty,
+        )
+        params = (queue, vt or self.vt, qty, max_poll_seconds, poll_interval_ms)
+        rows = self._execute_with_result(
+            _sql.READ_GROUPED_RR_WITH_POLL, params, conn=conn
+        )
+        return [Message.from_row(row, lambda x: x) for row in rows]
+
+    # =========================================================================
+    # Pop (Read and Delete)
+    # =========================================================================
+
+    @transaction
+    def pop(
+        self, queue: str, qty: int = 1, conn=None
+    ) -> Optional[Union[Message, List[Message]]]:
+        """
+        Pop message(s) from queue (read and immediately delete).
+
+        Warning: This provides at-most-once delivery semantics.
+        If processing fails after pop, the message is lost.
+
+        Args:
+            qty: Number of messages to pop
+
+        Returns:
+            Single Message if qty=1, List[Message] if qty>1, None if empty
+        """
+        log_with_context(
+            self.logger, logging.DEBUG, "Popping messages", queue=queue, qty=qty
+        )
+        rows = self._execute_with_result(_sql.POP, (queue, qty), conn=conn)
+        messages = [Message.from_row(row, lambda x: x) for row in rows]
+
+        if qty == 1:
+            return messages[0] if messages else None
+        return messages
+
+    # =========================================================================
+    # Deleting and Archiving
+    # =========================================================================
 
     @transaction
     def delete(self, queue: str, msg_id: int, conn=None) -> bool:
-        """Delete a message from a queue."""
-        PGMQLogger.log_with_context(
+        """
+        Delete a single message from queue.
+
+        Returns:
+            True if message was deleted, False if not found
+        """
+        log_with_context(
             self.logger, logging.DEBUG, "Deleting message", queue=queue, msg_id=msg_id
         )
-        query = "select pgmq.delete(queue_name=>%s, msg_id=>%s);"
-        result = self._execute_query_with_result(query, [queue, msg_id], conn=conn)
-
-        # Log result with context
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Message deleted",
-            queue=queue,
-            msg_id=msg_id,
-            success=result[0][0],
-        )
-        return result[0][0]
+        result = self._execute_one(_sql.DELETE, (queue, msg_id), conn=conn)
+        return result[0] if result else False
 
     @transaction
     def delete_batch(self, queue: str, msg_ids: List[int], conn=None) -> List[int]:
-        """Delete multiple messages from a queue."""
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Deleting batch messages",
-            queue=queue,
-            msg_ids=msg_ids,
-        )
-        query = "select * from pgmq.delete(queue_name=>%s, msg_ids=>%s);"
-        result = self._execute_query_with_result(query, [queue, msg_ids], conn=conn)
+        """
+        Delete multiple messages.
 
-        deleted_ids = [x[0] for x in result]
-        # Log result with context
-        PGMQLogger.log_with_context(
+        Returns:
+            List of message IDs that were actually deleted (may be subset)
+        """
+        log_with_context(
             self.logger,
             logging.DEBUG,
-            "Batch messages deleted",
+            "Deleting batch",
             queue=queue,
-            deleted_ids=deleted_ids,
-            count=len(deleted_ids),
+            count=len(msg_ids),
         )
-        return deleted_ids
+        rows = self._execute_with_result(_sql.DELETE_BATCH, (queue, msg_ids), conn=conn)
+        return [row[0] for row in rows]
 
     @transaction
     def archive(self, queue: str, msg_id: int, conn=None) -> bool:
-        """Archive a message from a queue."""
-        PGMQLogger.log_with_context(
+        """
+        Archive a single message (remove from queue, add to archive table).
+
+        Returns:
+            True if message was archived, False if not found
+        """
+        log_with_context(
             self.logger, logging.DEBUG, "Archiving message", queue=queue, msg_id=msg_id
         )
-        query = "select pgmq.archive(queue_name=>%s, msg_id=>%s);"
-        result = self._execute_query_with_result(query, [queue, msg_id], conn=conn)
-        # Log result with context
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Message archived",
-            queue=queue,
-            msg_id=msg_id,
-            success=result[0][0],
-        )
-        return result[0][0]
+        result = self._execute_one(_sql.ARCHIVE, (queue, msg_id), conn=conn)
+        return result[0] if result else False
 
     @transaction
     def archive_batch(self, queue: str, msg_ids: List[int], conn=None) -> List[int]:
-        """Archive multiple messages from a queue."""
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Archiving batch messages",
-            queue=queue,
-            msg_ids=msg_ids,
-        )
-        query = "select * from pgmq.archive(queue_name=>%s, msg_ids=>%s);"
-        result = self._execute_query_with_result(query, [queue, msg_ids], conn=conn)
+        """
+        Archive multiple messages.
 
-        archived_ids = [x[0] for x in result]
-        # Log result with context
-        PGMQLogger.log_with_context(
+        Returns:
+            List of message IDs that were actually archived
+        """
+        log_with_context(
             self.logger,
             logging.DEBUG,
-            "Batch messages archived",
+            "Archiving batch",
             queue=queue,
-            archived_ids=archived_ids,
-            count=len(archived_ids),
+            count=len(msg_ids),
         )
-        return archived_ids
+        rows = self._execute_with_result(
+            _sql.ARCHIVE_BATCH, (queue, msg_ids), conn=conn
+        )
+        return [row[0] for row in rows]
 
     @transaction
     def purge(self, queue: str, conn=None) -> int:
-        """Purge a queue."""
-        PGMQLogger.log_with_context(
-            self.logger, logging.DEBUG, "Purging queue", queue=queue
-        )
-        query = "select pgmq.purge_queue(queue_name=>%s);"
-        result = self._execute_query_with_result(query, [queue], conn=conn)
+        """
+        Delete all messages from queue.
 
-        # Log result with context
-        PGMQLogger.log_with_context(
-            self.logger, logging.DEBUG, "Queue purged", queue=queue, count=result[0][0]
-        )
-        return result[0][0]
+        Returns:
+            Number of messages deleted
+        """
+        log_with_context(self.logger, logging.DEBUG, "Purging queue", queue=queue)
+        result = self._execute_one(_sql.PURGE_QUEUE, (queue,), conn=conn)
+        return result[0] if result else 0
 
-    @transaction
-    def metrics(self, queue: str, conn=None) -> QueueMetrics:
-        """Get metrics for a specific queue."""
-        PGMQLogger.log_with_context(
-            self.logger, logging.DEBUG, "Getting queue metrics", queue=queue
-        )
-        query = "SELECT * FROM pgmq.metrics(queue_name=>%s);"
-        result = self._execute_query_with_result(query, [queue], conn=conn)[0]
-        metrics = QueueMetrics(
-            queue_name=result[0],
-            queue_length=result[1],
-            newest_msg_age_sec=result[2],
-            oldest_msg_age_sec=result[3],
-            total_messages=result[4],
-            scrape_time=result[5],
-        )
-
-        # Log result with context
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "Queue metrics retrieved",
-            queue=queue,
-            queue_length=metrics.queue_length,
-            total_messages=metrics.total_messages,
-        )
-        return metrics
+    # =========================================================================
+    # Visibility Timeout
+    # =========================================================================
 
     @transaction
-    def metrics_all(self, conn=None) -> List[QueueMetrics]:
-        """Get metrics for all queues."""
-        PGMQLogger.log_with_context(
-            self.logger, logging.DEBUG, "Getting all queue metrics"
-        )
+    def set_vt(
+        self,
+        queue: str,
+        msg_id: Union[int, List[int]],
+        vt: Union[int, datetime],
+        conn=None,
+    ) -> Optional[Union[Message, List[Message]]]:
+        """
+        Set visibility timeout for message(s).
 
-        query = "SELECT * FROM pgmq.metrics_all();"
-        results = self._execute_query_with_result(query, conn=conn)
-        metrics_list = [
-            QueueMetrics(
-                queue_name=row[0],
-                queue_length=row[1],
-                newest_msg_age_sec=row[2],
-                oldest_msg_age_sec=row[3],
-                total_messages=row[4],
-                scrape_time=row[5],
-            )
-            for row in results
-        ]
+        Args:
+            msg_id: Single ID or list of IDs
+            vt: Seconds from now (int) or absolute timestamp (datetime)
 
-        # Log result with context
-        PGMQLogger.log_with_context(
-            self.logger,
-            logging.DEBUG,
-            "All queue metrics retrieved",
-            count=len(metrics_list),
-        )
-        return metrics_list
+        Returns:
+            Updated message(s) with new visibility timeout
+        """
+        is_batch = isinstance(msg_id, list)
 
-    @transaction
-    def set_vt(self, queue: str, msg_id: int, vt: int, conn=None) -> Message:
-        """Set the visibility timeout for a specific message."""
-        PGMQLogger.log_with_context(
+        log_with_context(
             self.logger,
             logging.DEBUG,
             "Setting visibility timeout",
             queue=queue,
-            msg_id=msg_id,
-            vt=vt,
-        )
-        query = "select msg_id, read_ct, enqueued_at, vt, message from pgmq.set_vt(queue_name=>%s::text, msg_id=>%s::bigint, vt=>%s::integer);"
-        result = self._execute_query_with_result(query, [queue, msg_id, vt], conn=conn)[
-            0
-        ]
-        message = Message(
-            msg_id=result[0],
-            read_ct=result[1],
-            enqueued_at=result[2],
-            vt=result[3],
-            message=result[4],
+            is_batch=is_batch,
         )
 
-        # Log result with context
-        PGMQLogger.log_with_context(
+        if is_batch:
+            sql = _sql.SET_VT_BATCH
+            params = (queue, msg_id, vt)
+        else:
+            sql = _sql.SET_VT
+            params = (queue, msg_id, vt)
+
+        rows = self._execute_with_result(sql, params, conn=conn)
+        messages = [Message.from_row(row, lambda x: x) for row in rows]
+
+        if is_batch:
+            return messages
+        return messages[0] if messages else None
+
+    # =========================================================================
+    # Metrics
+    # =========================================================================
+
+    def metrics(self, queue: str, conn=None) -> QueueMetrics:
+        """Get metrics for a specific queue."""
+        log_with_context(self.logger, logging.DEBUG, "Getting metrics", queue=queue)
+        row = self._execute_one(_sql.METRICS, (queue,), conn=conn)
+        if not row:
+            raise ValueError(f"Queue '{queue}' not found")
+        return QueueMetrics.from_row(row)
+
+    def metrics_all(self, conn=None) -> List[QueueMetrics]:
+        """Get metrics for all queues."""
+        log_with_context(self.logger, logging.DEBUG, "Getting all metrics")
+        rows = self._execute_with_result(_sql.METRICS_ALL, conn=conn)
+        return [QueueMetrics.from_row(row) for row in rows]
+
+    # =========================================================================
+    # Notifications
+    # =========================================================================
+
+    @transaction
+    def enable_notify(
+        self, queue: str, throttle_interval_ms: int = 250, conn=None
+    ) -> None:
+        """
+        Enable PostgreSQL NOTIFY for new message insertions.
+
+        Args:
+            throttle_interval_ms: Minimum ms between notifications (0 to disable)
+        """
+        log_with_context(
             self.logger,
             logging.DEBUG,
-            "Visibility timeout set",
+            "Enabling notifications",
             queue=queue,
-            msg_id=msg_id,
-            new_vt=message.vt,
+            throttle=throttle_interval_ms,
         )
-        return message
+        self._execute(_sql.ENABLE_NOTIFY, (queue, throttle_interval_ms), conn=conn)
+
+    @transaction
+    def disable_notify(self, queue: str, conn=None) -> None:
+        """Disable NOTIFY triggers for a queue."""
+        log_with_context(
+            self.logger, logging.DEBUG, "Disabling notifications", queue=queue
+        )
+        self._execute(_sql.DISABLE_NOTIFY, (queue,), conn=conn)
+
+    @transaction
+    def update_notify(self, queue: str, throttle_interval_ms: int, conn=None) -> None:
+        """Update throttle interval for notifications."""
+        log_with_context(
+            self.logger,
+            logging.DEBUG,
+            "Updating notification throttle",
+            queue=queue,
+            throttle=throttle_interval_ms,
+        )
+        self._execute(_sql.UPDATE_NOTIFY, (queue, throttle_interval_ms), conn=conn)
+
+    def list_notify_throttles(self, conn=None) -> List[NotificationThrottle]:
+        """List all notification configurations."""
+        rows = self._execute_with_result(_sql.LIST_NOTIFY_THROTTLES, conn=conn)
+        return [NotificationThrottle.from_row(row) for row in rows]
+
+    # =========================================================================
+    # Utilities
+    # =========================================================================
+
+    def validate_routing_key(self, routing_key: str, conn=None) -> bool:
+        """Validate routing key format."""
+        try:
+            self._execute(_sql.VALIDATE_ROUTING_KEY, (routing_key,), conn=conn)
+            return True
+        except Exception:
+            return False
+
+    def validate_topic_pattern(self, pattern: str, conn=None) -> bool:
+        """Validate topic pattern format."""
+        try:
+            self._execute(_sql.VALIDATE_TOPIC_PATTERN, (pattern,), conn=conn)
+            return True
+        except Exception:
+            return False
+
+    @transaction
+    def create_fifo_index(self, queue: str, conn=None) -> None:
+        """Create GIN index on headers for FIFO performance."""
+        log_with_context(self.logger, logging.DEBUG, "Creating FIFO index", queue=queue)
+        self._execute(_sql.CREATE_FIFO_INDEX, (queue,), conn=conn)
+
+    def create_fifo_indexes_all(self, conn=None) -> None:
+        """Create FIFO indexes on all queues."""
+        log_with_context(self.logger, logging.DEBUG, "Creating all FIFO indexes")
+        self._execute(_sql.CREATE_FIFO_INDEXES_ALL, conn=conn)
+
+    @transaction
+    def convert_archive_partitioned(
+        self,
+        queue: str,
+        partition_interval: Union[int, str] = 10000,
+        retention_interval: Union[int, str] = 100000,
+        leading_partition: int = 10,
+        conn=None,
+    ) -> None:
+        """Convert archive table to partitioned."""
+        log_with_context(
+            self.logger, logging.DEBUG, "Converting archive to partitioned", queue=queue
+        )
+        self._execute(
+            _sql.CONVERT_ARCHIVE_PARTITIONED,
+            (
+                queue,
+                str(partition_interval),
+                str(retention_interval),
+                leading_partition,
+            ),
+            conn=conn,
+        )
 
     @transaction
     def detach_archive(self, queue: str, conn=None) -> None:
-        """Detach an archive from a queue."""
-        PGMQLogger.log_with_context(
-            self.logger, logging.DEBUG, "Detaching archive", queue=queue
-        )
+        """
+        Detach archive table from extension (deprecated in PGMQ v2.0, no-op).
 
-        query = "select pgmq.detach_archive(queue_name=>%s);"
-        self._execute_query(query, [queue], conn=conn)
-
-        # Log completion with context
-        PGMQLogger.log_with_context(
-            self.logger, logging.DEBUG, "Archive detached", queue=queue
+        Kept for backward compatibility.
+        """
+        log_with_context(
+            self.logger, logging.DEBUG, "Detaching archive (deprecated)", queue=queue
         )
+        self._execute(_sql.DETACH_ARCHIVE, (queue,), conn=conn)
