@@ -187,8 +187,13 @@ class BaseTestPGMQueue(unittest.IsolatedAsyncioTestCase):
 
     async def test_list_queues(self):
         """Test listing all queues."""
+        await self.queue.create_queue("test_queue_2")
         queues = await self.queue.list_queues()
-        self.assertIn(self.test_queue, queues)
+
+        # Updated assertion: check .queue_name attribute
+        queue_names = [q.queue_name for q in queues]
+        self.assertIn(self.test_queue, queue_names)
+        self.assertIn("test_queue_2", queue_names)
 
     async def test_detach_archive(self):
         """Test detaching an archive from a queue."""

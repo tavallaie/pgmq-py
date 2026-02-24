@@ -180,8 +180,13 @@ class BaseTestPGMQueue(unittest.TestCase):
 
     def test_list_queues(self):
         """Test listing all queues."""
+        self.queue.create_queue("test_queue_2")
         queues = self.queue.list_queues()
-        self.assertIn(self.test_queue, queues)
+
+        # Updated assertion: check .queue_name attribute
+        queue_names = [q.queue_name for q in queues]
+        self.assertIn(self.test_queue, queue_names)
+        self.assertIn("test_queue_2", queue_names)
 
     def test_detach_archive(self):
         """Test detaching an archive from a queue."""
@@ -326,9 +331,9 @@ class TestPGMQueueNoExtension:
             # _execute_query should NOT be called with 'create extension' SQL
             for call in mock_execute_query.call_args_list:
                 args, kwargs = call
-                assert "create extension" not in str(args[0]), (
-                    "Should not run create extension SQL"
-                )
+                assert "create extension" not in str(
+                    args[0]
+                ), "Should not run create extension SQL"
 
 
 if __name__ == "__main__":
