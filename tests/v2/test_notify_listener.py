@@ -1,151 +1,143 @@
-# tests/v2/test_notify_listener.py
 import unittest
-import logging
-import io
+import asyncio
+import threading
 import time
+from psycopg.errors import UndefinedFunction
 
-from pgmq.logger import (
-    LoggingManager,
-    create_logger,
-    log_with_context,
-    log_performance,
-)
+from pgmq import PGMQueue
+from pgmq.async_queue import PGMQueue as AsyncPGMQueue
+from pgmq.notify_listener import SyncNotificationListener, AsyncNotificationListener
+from .utils import PG_HOST, PG_PORT, PG_DATABASE, PG_USERNAME, PG_PASSWORD
 
 
-class TestLoggerIsolation(unittest.TestCase):
-    """
-    Critical tests to ensure PGMQ logging does not break other loggers.
-    """
+class TestSyncNotificationListener(unittest.TestCase):
+    """Test the synchronous notification listener."""
 
-    def setUp(self):
-        LoggingManager._configured_loggers = {}
-        logging.getLogger("test_pgmq").handlers = []
-
-    def test_root_logger_not_modified(self):
-        root_logger = logging.getLogger()
-        initial_handlers = len(root_logger.handlers)
-        create_logger("test_pgmq", verbose=True)
-
-        root_logger = logging.getLogger()
-        self.assertEqual(
-            len(root_logger.handlers),
-            initial_handlers,
-            "PGMQ added handlers to the root logger, breaking isolation!",
+    def test_sync_listener_receives_notification(self):
+        """Test that SyncNotificationListener catches INSERT events."""
+        queue_name = "test_sync_notify"
+        queue = PGMQueue(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DATABASE,
+            username=PG_USERNAME,
+            password=PG_PASSWORD,
+            verbose=False,
         )
-
-    def test_no_duplicate_handlers(self):
-        log_name = "test_duplicate"
-        logging.getLogger(log_name).handlers = []
-
-        logger1 = LoggingManager.get_logger(log_name, verbose=True)
-        count1 = len(logger1.handlers)
-
-        logger2 = LoggingManager.get_logger(log_name, verbose=True)
-        count2 = len(logger2.handlers)
-
-        self.assertEqual(count1, count2, "Handlers were duplicated on second retrieval")
-        self.assertGreater(count1, 0, "Handlers were not created")
-
-        # Cleanup: close handlers to avoid ResourceWarning
-        for h in logger1.handlers[:]:
-            h.close()
-            logger1.removeHandler(h)
-
-    def test_propagation_control(self):
-        root_logger = logging.getLogger()
-        root_logger.setLevel(logging.DEBUG)
-        old_handlers = root_logger.handlers
-        root_logger.handlers = []
-
-        stream = io.StringIO()
-        handler = logging.StreamHandler(stream)
-        root_logger.addHandler(handler)
 
         try:
-            pgmq_log = create_logger("test_propagate", verbose=True)
-            pgmq_log.warning("Test Warning")
-            output = stream.getvalue()
-            self.assertIsInstance(output, str)
-        finally:
-            root_logger.removeHandler(handler)
-            root_logger.handlers = old_handlers
+            queue.create_queue(queue_name)
+            queue.enable_notify(queue_name, throttle_interval_ms=0)
+        except UndefinedFunction as e:
+            queue.pool.close()
+            self.skipTest(f"Notification functions not supported by DB: {e}")
 
+        received_payloads = []
+        event = threading.Event()
 
-class TestLoggingFeatures(unittest.TestCase):
-    """Test specific features of the logger implementation."""
+        def callback(payload):
+            print("SYNC CALLBACK RECEIVED:", payload)
+            received_payloads.append(payload)
+            event.set()
 
-    def setUp(self):
-        LoggingManager._configured_loggers = {}
-        self.log_capture = io.StringIO()
-        self.handler = logging.StreamHandler(self.log_capture)
-
-    def tearDown(self):
-        self.log_capture.close()
-
-    def test_log_with_context_stdlib(self):
-        logger = logging.getLogger("test_context")
-        logger.handlers = [self.handler]
-        logger.setLevel(logging.DEBUG)
-
-        log_with_context(
-            logger, logging.INFO, "User action", user_id=123, action="click"
+        listener = SyncNotificationListener(queue)
+        listener_thread = threading.Thread(
+            target=listener.listen,
+            args=(queue_name, callback),
+            kwargs={"timeout": 5.0},
+            daemon=True,
         )
-        output = self.log_capture.getvalue()
-        self.assertIn("User action", output)
-        self.assertIn("user_id=123", output)
 
-    def test_performance_decorator_sync(self):
-        logger = logging.getLogger("test_perf")
-        logger.handlers = [self.handler]
-        logger.setLevel(logging.DEBUG)
+        try:
+            listener_thread.start()
+            time.sleep(2.0)  # Give LISTEN time to register
 
-        @log_performance(logger)
-        def slow_function():
-            time.sleep(0.05)
-            return "done"
+            msg = {"data": "test_notify_sync"}
+            queue.send(queue_name, msg)
+            print("Message sent (sync test)")
 
-        result = slow_function()
-        output = self.log_capture.getvalue()
+            success = event.wait(timeout=10.0)
 
-        self.assertEqual(result, "done")
-        self.assertIn("Completed slow_function", output)
-        self.assertIn("success=True", output)
+            self.assertTrue(success, "Notification not received within timeout")
+            self.assertGreaterEqual(len(received_payloads), 1, "No payloads received")
+            # We no longer assert on ["data"] because payload is empty in PGMQ
+            # Optional: check for our fallback dict
+            self.assertIn("event", received_payloads[0])
+            self.assertEqual(received_payloads[0]["event"], "insert")
 
-    def test_performance_decorator_exception(self):
-        logger = logging.getLogger("test_perf_exc")
-        logger.handlers = [self.handler]
-        logger.setLevel(logging.DEBUG)
+        finally:
+            listener.stop()
+            listener_thread.join(timeout=3.0)
+            queue.drop_queue(queue_name)
+            queue.pool.close()
 
-        @log_performance(logger)
-        def failing_function():
-            raise ValueError("database error")
 
-        with self.assertRaises(ValueError):
-            failing_function()
+class TestAsyncNotificationListener(unittest.IsolatedAsyncioTestCase):
+    """Test the asynchronous notification listener."""
 
-        output = self.log_capture.getvalue()
-        self.assertIn("Failed failing_function", output)
+    async def asyncSetUp(self):
+        self.queue = AsyncPGMQueue(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DATABASE,
+            username=PG_USERNAME,
+            password=PG_PASSWORD,
+            verbose=False,
+        )
+        await self.queue.init()
+        self.queue_name = "test_async_notify"
 
-    def test_structured_logging_format(self):
-        LoggingManager._configured_loggers = {}
+        try:
+            await self.queue.create_queue(self.queue_name)
+            await self.queue.enable_notify(self.queue_name, throttle_interval_ms=0)
+            self.notifications_enabled = True
+        except UndefinedFunction as e:
+            self.notifications_enabled = False
+            await self.queue.close()
+            self.skipTest(f"Notification functions not supported by DB: {e}")
 
-        logger = LoggingManager.get_logger("test_struct", verbose=True, structured=True)
+    async def asyncTearDown(self):
+        if hasattr(self, "queue") and self.queue.pool:
+            try:
+                await self.queue.drop_queue(self.queue_name)
+            except:  # noqa: E722
+                pass
+            await self.queue.close()
 
-        stream = io.StringIO()
-        handler = logging.StreamHandler(stream)
+    async def test_async_listener_receives_notification(self):
+        """Test that AsyncNotificationListener catches INSERT events."""
+        if not self.notifications_enabled:
+            return
 
-        fmt = '{{"timestamp": "%(asctime)s", "level": "%(levelname)s", "message": "%(message)s"}}'
-        handler.setFormatter(logging.Formatter(fmt))
+        received_payloads = []
+        event = asyncio.Event()
 
-        # Clear existing handlers to avoid resource conflicts and set new one
-        for h in logger.handlers[:]:
-            h.close()
-            logger.removeHandler(h)
+        async def callback(payload):
+            print("ASYNC CALLBACK RECEIVED:", payload)
+            received_payloads.append(payload)
+            event.set()
 
-        logger.handlers = [handler]
-        logger.setLevel(logging.DEBUG)
+        listener = AsyncNotificationListener(self.queue)
+        listen_task = asyncio.create_task(listener.listen(self.queue_name, callback))
 
-        log_with_context(logger, logging.INFO, "Structured test")
+        try:
+            await asyncio.sleep(2.0)  # Wait for listener to start
 
-        output = stream.getvalue()
-        self.assertIn('"message": "Structured test"', output)
+            msg = {"data": "test_notify_async"}
+            await self.queue.send(self.queue_name, msg)
+            print("Message sent (async test)")
+
+            await asyncio.wait_for(event.wait(), timeout=10.0)
+
+            self.assertGreaterEqual(len(received_payloads), 1, "No payloads received")
+            # No ["data"] key expected
+            self.assertIn("event", received_payloads[0])
+            self.assertEqual(received_payloads[0]["event"], "insert")
+
+        finally:
+            listener.stop()
+            listen_task.cancel()
+            try:
+                await listen_task
+            except asyncio.CancelledError:
+                pass
