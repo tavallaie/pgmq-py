@@ -56,9 +56,7 @@ class LoggingManager:
         using detected backend (loguru preferred if available).
         """
         # Create a cache key based on configuration to avoid mixing configs
-        cache_key = (
-            f"{name}:{verbose}:{log_filename}:{structured}:{rotation}:{retention}"
-        )
+        cache_key = f"{name}:{verbose}:{log_filename}:{structured}:{rotation}:{retention}:{compression}"
 
         if cache_key in cls._configured_loggers:
             return cls._configured_loggers[cache_key]
@@ -121,8 +119,7 @@ class LoggingManager:
         """Configure and return a standard library Logger instance."""
         logger = logging.getLogger(name)
 
-        # Return existing if already configured (standard behavior)
-        # To force reconfiguration, logger.handlers could be cleared, but usually risky
+        # Return existing if already configured
         if logger.handlers:
             return logger
 
@@ -233,6 +230,8 @@ class LoggingManager:
                     retention=retention or "1 week",
                     compression=compression,
                     enqueue=True,
+                    backtrace=True,  # Restored
+                    diagnose=True,  # Restored
                 )
                 cls._loguru_handler_ids.add(file_id)
 
