@@ -91,13 +91,16 @@ class QueueRecord:
 
     @classmethod
     def from_row(cls, row: tuple) -> "QueueRecord":
-        """Create QueueRecord from database row."""
         return cls(
             queue_name=row[0],
             created_at=row[1],
             is_partitioned=row[2],
             is_unlogged=row[3],
         )
+
+    def __str__(self) -> str:
+        """Return queue name for backward compatibility printing."""
+        return self.queue_name
 
 
 @dataclass
