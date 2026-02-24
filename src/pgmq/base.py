@@ -1,4 +1,3 @@
-# src/pgmq/base.py
 """
 Base configuration and shared utilities for PGMQ clients.
 """
@@ -73,8 +72,7 @@ class BaseQueue:
     """
     Base class providing shared initialization and utilities for queue clients.
 
-    This class handles configuration management, logging setup, and provides
-    the common interface that both sync and async implementations extend.
+    This class handles configuration management, logging setup.
     """
 
     config: PGMQConfig
@@ -115,44 +113,3 @@ class BaseQueue:
             host=self.config.host,
             database=self.config.database,
         )
-
-    # Backward compatibility: expose config properties directly
-    @property
-    def host(self) -> str:
-        return self.config.host
-
-    @property
-    def port(self) -> str:
-        return self.config.port
-
-    @property
-    def database(self) -> str:
-        return self.config.database
-
-    @property
-    def username(self) -> str:
-        return self.config.username
-
-    @property
-    def password(self) -> str:
-        return self.config.password
-
-    @property
-    def delay(self) -> int:
-        return self.config.delay
-
-    @property
-    def vt(self) -> int:
-        return self.config.vt
-
-    @property
-    def pool_size(self) -> int:
-        return self.config.pool_size
-
-    @property
-    def verbose(self) -> bool:
-        return self.config.verbose
-
-    @property
-    def log_filename(self) -> Optional[str]:
-        return self.config.log_filename
