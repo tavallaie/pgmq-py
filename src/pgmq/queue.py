@@ -130,15 +130,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def create_queue(self, queue: str, unlogged: bool = False, conn=None) -> None:
-        """
-        Create a new queue.
-
-        Args:
-            queue: Name of the queue.
-            unlogged: If True, creates an unlogged table (no WAL logging).
-            conn: Optional connection for transaction management. If provided, the operation
-                  will be executed within this connection's transaction context.
-        """
+        """Create a new queue."""
         log_with_context(
             self.logger, logging.DEBUG, "Creating queue", queue=queue, unlogged=unlogged
         )
@@ -153,17 +145,7 @@ class PGMQueue(BaseQueue):
         retention_interval: Union[int, str] = 100000,
         conn=None,
     ) -> None:
-        """
-        Create a partitioned queue.
-
-        Requires `pg_partman` extension.
-
-        Args:
-            queue: Name of the queue.
-            partition_interval: Interval for partitioning.
-            retention_interval: Retention policy.
-            conn: Optional connection for transaction management.
-        """
+        """Create a partitioned queue."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -180,16 +162,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def drop_queue(self, queue: str, conn=None) -> bool:
-        """
-        Drop a queue.
-
-        Args:
-            queue: Name of the queue.
-            conn: Optional connection for transaction management.
-
-        Returns:
-            True if successful.
-        """
+        """Drop a queue."""
         log_with_context(self.logger, logging.DEBUG, "Dropping queue", queue=queue)
         result = self._execute_one(_sql.DROP_QUEUE, (queue,), conn=conn)
         return result[0] if result else False
@@ -198,8 +171,13 @@ class PGMQueue(BaseQueue):
         """
         List all queues with their metadata.
 
+        .. versionchanged:: 2.0.0
+            This method now returns a list of :class:`QueueRecord` objects
+            instead of a list of strings. To get the queue name, access the
+            ``queue_name`` attribute of the returned object.
+
         Returns:
-            List of QueueRecord objects.
+            List[QueueRecord]: A list of queue metadata objects.
         """
         log_with_context(self.logger, logging.DEBUG, "Listing queues")
         warnings.warn(
@@ -213,21 +191,9 @@ class PGMQueue(BaseQueue):
         return [QueueRecord.from_row(row) for row in rows]
 
     def validate_queue_name(self, queue_name: str, conn=None) -> bool:
-        """
-        Validate queue name format.
-
-        Args:
-            queue_name: The queue name to validate.
-            conn: Optional connection.
-
-        Returns:
-            True if valid, False otherwise.
-        """
-        try:
-            self._execute(_sql.VALIDATE_QUEUE_NAME, (queue_name,), conn=conn)
-            return True
-        except Exception:
-            return False
+        """Validate queue name format. Raises exception if invalid."""
+        self._execute(_sql.VALIDATE_QUEUE_NAME, (queue_name,), conn=conn)
+        return True
 
     # =========================================================================
     # Sending Messages
@@ -243,20 +209,7 @@ class PGMQueue(BaseQueue):
         tz: Union[int, datetime, None] = None,  # Backward compatible alias
         conn=None,
     ) -> int:
-        """
-        Send a single message to a queue.
-
-        Args:
-            queue: Name of the queue.
-            message: Message payload.
-            headers: Optional headers.
-            delay: Optional delay.
-            tz: (Deprecated) Alias for delay.
-            conn: Optional connection for transaction management.
-
-        Returns:
-            Message ID.
-        """
+        """Send a single message to a queue."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -264,6 +217,7 @@ class PGMQueue(BaseQueue):
             queue=queue,
         )
 
+        # Handle backward compatibility: 'tz' acts as 'delay'
         effective_delay = tz if tz is not None else delay
 
         has_headers = headers is not None
@@ -290,19 +244,7 @@ class PGMQueue(BaseQueue):
         delay: Union[int, datetime, None] = None,
         conn=None,
     ) -> List[int]:
-        """
-        Send multiple messages.
-
-        Args:
-            queue: Name of the queue.
-            messages: List of payloads.
-            headers: Optional list of headers.
-            delay: Optional delay.
-            conn: Optional connection for transaction management.
-
-        Returns:
-            List of message IDs.
-        """
+        """Send multiple messages to a queue."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -347,19 +289,7 @@ class PGMQueue(BaseQueue):
         delay: Optional[int] = None,
         conn=None,
     ) -> int:
-        """
-        Send a message to all queues bound to a topic routing key.
-
-        Args:
-            routing_key: The routing key.
-            message: Message payload.
-            headers: Optional headers.
-            delay: Optional delay.
-            conn: Optional connection for transaction management.
-
-        Returns:
-            Number of queues the message was delivered to.
-        """
+        """Send message to all queues matching the routing key pattern."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -391,19 +321,7 @@ class PGMQueue(BaseQueue):
         delay: Union[int, datetime, None] = None,
         conn=None,
     ) -> List[BatchTopicResult]:
-        """
-        Send a batch of messages to queues bound to a topic routing key.
-
-        Args:
-            routing_key: The routing key.
-            messages: List of payloads.
-            headers: Optional list of headers.
-            delay: Optional delay.
-            conn: Optional connection for transaction management.
-
-        Returns:
-            List of BatchTopicResult.
-        """
+        """Send batch of messages to all matching queues."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -436,14 +354,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def bind_topic(self, pattern: str, queue_name: str, conn=None) -> None:
-        """
-        Bind a queue to a topic pattern.
-
-        Args:
-            pattern: Topic pattern.
-            queue_name: Queue name.
-            conn: Optional connection for transaction management.
-        """
+        """Bind a pattern to a queue for topic routing."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -455,17 +366,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def unbind_topic(self, pattern: str, queue_name: str, conn=None) -> bool:
-        """
-        Unbind a queue from a topic pattern.
-
-        Args:
-            pattern: Topic pattern.
-            queue_name: Queue name.
-            conn: Optional connection for transaction management.
-
-        Returns:
-            True if successful.
-        """
+        """Remove a pattern binding from a queue."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -479,7 +380,7 @@ class PGMQueue(BaseQueue):
     def list_topic_bindings(
         self, queue_name: Optional[str] = None, conn=None
     ) -> List[TopicBinding]:
-        """List all topic bindings."""
+        """List all topic bindings, optionally filtered by queue."""
         if queue_name:
             rows = self._execute_with_result(
                 _sql.LIST_TOPIC_BINDINGS_FOR_QUEUE, (queue_name,), conn=conn
@@ -489,7 +390,7 @@ class PGMQueue(BaseQueue):
         return [TopicBinding.from_row(row) for row in rows]
 
     def test_routing(self, routing_key: str, conn=None) -> List[RoutingResult]:
-        """Test routing without sending."""
+        """Test which queues would receive a message without actually sending."""
         rows = self._execute_with_result(_sql.TEST_ROUTING, (routing_key,), conn=conn)
         return [RoutingResult.from_row(row) for row in rows]
 
@@ -506,19 +407,7 @@ class PGMQueue(BaseQueue):
         conditional: Optional[Dict[str, Any]] = None,
         conn=None,
     ) -> Optional[Union[Message, List[Message]]]:
-        """
-        Read messages from a queue.
-
-        Args:
-            queue: Name of the queue.
-            vt: Visibility timeout.
-            qty: Max messages to read.
-            conditional: Optional filter condition.
-            conn: Optional connection for transaction management.
-
-        Returns:
-            Message or list of Messages.
-        """
+        """Read message(s) from queue with visibility timeout."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -686,17 +575,7 @@ class PGMQueue(BaseQueue):
     def pop(
         self, queue: str, qty: int = 1, conn=None
     ) -> Optional[Union[Message, List[Message]]]:
-        """
-        Pop message(s) from queue (read and immediately delete).
-
-        Args:
-            queue: Name of the queue.
-            qty: Number of messages.
-            conn: Optional connection for transaction management.
-
-        Returns:
-            Message or list of Messages.
-        """
+        """Pop message(s) from queue (read and immediately delete)."""
         log_with_context(
             self.logger, logging.DEBUG, "Popping messages", queue=queue, qty=qty
         )
@@ -776,18 +655,7 @@ class PGMQueue(BaseQueue):
         vt: Union[int, datetime],
         conn=None,
     ) -> Optional[Union[Message, List[Message]]]:
-        """
-        Set visibility timeout for message(s).
-
-        Args:
-            queue: Name of the queue.
-            msg_id: Message ID or list of IDs.
-            vt: Visibility timeout (seconds or timestamp).
-            conn: Optional connection for transaction management.
-
-        Returns:
-            Updated Message or list of Messages.
-        """
+        """Set visibility timeout for message(s)."""
         is_batch = isinstance(msg_id, list)
         vt_is_timestamp = isinstance(vt, datetime)
 
@@ -799,6 +667,7 @@ class PGMQueue(BaseQueue):
             is_batch=is_batch,
         )
 
+        # Robust SQL selection using helper
         sql = _sql.get_set_vt_sql(is_batch, vt_is_timestamp)
         params = (queue, msg_id, vt)
 
