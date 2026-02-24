@@ -1,4 +1,3 @@
-# src/pgmq/queue.py
 """
 Synchronous PGMQ client implementation.
 
@@ -6,14 +5,16 @@ This module provides the main PGMQueue class for synchronous database operations
 with full support for all PGMQ extension features including topics, FIFO, and notifications.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
-
+import os
+import logging
+import warnings
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from pgmq.base import BaseQueue
+from pgmq.base import BaseQueue, PGMQConfig
 from pgmq import _sql
 from pgmq.decorators import transaction
 from pgmq.logger import log_with_context
@@ -26,34 +27,53 @@ from pgmq.messages import (
     BatchTopicResult,
     NotificationThrottle,
 )
-import logging
 
 
 @dataclass
 class PGMQueue(BaseQueue):
     """
     Synchronous PGMQueue client for PostgreSQL Message Queue operations.
-
-    Features:
-    - Standard queue operations (create, drop, send, read, archive)
-    - Topic-based message routing (publish/subscribe patterns)
-    - FIFO (First-In-First-Out) queues with message grouping
-    - PostgreSQL NOTIFY/LISTEN for real-time message notifications
-    - Batch operations for high throughput
-    - Message headers and metadata support
-
-    Example:
-        >>> from pgmq import PGMQueue
-        >>> queue = PGMQueue(host="localhost", database="mydb")
-        >>> queue.create_queue("my_queue")
-        >>> msg_id = queue.send("my_queue", {"hello": "world"})
-        >>> msg = queue.read("my_queue", vt=30)
     """
 
-    pool: ConnectionPool = None  # type: ignore
+    # --- Backward Compatible Fields ---
+    host: str = field(default_factory=lambda: os.getenv("PG_HOST", "localhost"))
+    port: str = field(default_factory=lambda: os.getenv("PG_PORT", "5432"))
+    database: str = field(default_factory=lambda: os.getenv("PG_DATABASE", "postgres"))
+    username: str = field(default_factory=lambda: os.getenv("PG_USERNAME", "postgres"))
+    password: str = field(default_factory=lambda: os.getenv("PG_PASSWORD", "postgres"))
+    delay: int = 0
+    vt: int = 30
+    pool_size: int = 10
+    verbose: bool = False
+    log_filename: Optional[str] = None
+    init_extension: bool = True
+    structured_logging: bool = False
+    log_rotation: bool = False
+    log_rotation_size: str = "10 MB"
+    log_retention: str = "1 week"
+
+    # --- Internal Fields ---
+    pool: ConnectionPool = field(init=False, default=None)  # type: ignore
 
     def __post_init__(self):
         """Initialize connection pool after dataclass construction."""
+        self.config = PGMQConfig(
+            host=self.host,
+            port=self.port,
+            database=self.database,
+            username=self.username,
+            password=self.password,
+            delay=self.delay,
+            vt=self.vt,
+            pool_size=self.pool_size,
+            verbose=self.verbose,
+            log_filename=self.log_filename,
+            init_extension=self.init_extension,
+            structured_logging=self.structured_logging,
+            log_rotation=self.log_rotation,
+            log_rotation_size=self.log_rotation_size,
+            log_retention=self.log_retention,
+        )
         super().__init__(config=self.config)
         self._init_pool()
         if self.config.init_extension:
@@ -109,13 +129,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def create_queue(self, queue: str, unlogged: bool = False, conn=None) -> None:
-        """
-        Create a new queue.
-
-        Args:
-            queue: Name of the queue (max 47 characters)
-            unlogged: Use unlogged table for higher performance but less durability
-        """
+        """Create a new queue."""
         log_with_context(
             self.logger, logging.DEBUG, "Creating queue", queue=queue, unlogged=unlogged
         )
@@ -130,14 +144,7 @@ class PGMQueue(BaseQueue):
         retention_interval: Union[int, str] = 100000,
         conn=None,
     ) -> None:
-        """
-        Create a partitioned queue (requires pg_partman extension).
-
-        Args:
-            queue: Queue name
-            partition_interval: Partition size (e.g., '10000' or '1 day')
-            retention_interval: Retention before deleting old partitions
-        """
+        """Create a partitioned queue."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -154,34 +161,38 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def drop_queue(self, queue: str, conn=None) -> bool:
-        """
-        Drop a queue and its archive table.
-
-        Returns:
-            True if queue was dropped, False if it didn't exist
-        """
+        """Drop a queue."""
         log_with_context(self.logger, logging.DEBUG, "Dropping queue", queue=queue)
         result = self._execute_one(_sql.DROP_QUEUE, (queue,), conn=conn)
         return result[0] if result else False
 
     def list_queues(self, conn=None) -> List[QueueRecord]:
-        """List all queues with their metadata."""
+        """
+        List all queues with their metadata.
+
+        .. versionchanged:: 2.0.0
+            This method now returns a list of :class:`QueueRecord` objects
+            instead of a list of strings. To get the queue name, access the
+            ``queue_name`` attribute of the returned object.
+
+        Returns:
+            List[QueueRecord]: A list of queue metadata objects.
+        """
         log_with_context(self.logger, logging.DEBUG, "Listing queues")
+        warnings.warn(
+            "list_queues() now returns List[QueueRecord] instead of List[str]. "
+            "Access the queue name via the .queue_name attribute. "
+            "This warning will be removed in a future version.",
+            UserWarning,
+            stacklevel=2,
+        )
         rows = self._execute_with_result(_sql.LIST_QUEUES, conn=conn)
         return [QueueRecord.from_row(row) for row in rows]
 
     def validate_queue_name(self, queue_name: str, conn=None) -> bool:
-        """
-        Validate that a queue name is valid.
-
-        Raises:
-            Exception: If validation fails (invalid format or too long)
-        """
-        try:
-            self._execute(_sql.VALIDATE_QUEUE_NAME, (queue_name,), conn=conn)
-            return True
-        except Exception:
-            return False
+        """Validate queue name format. Raises exception if invalid."""
+        self._execute(_sql.VALIDATE_QUEUE_NAME, (queue_name,), conn=conn)
+        return True
 
     # =========================================================================
     # Sending Messages
@@ -194,41 +205,31 @@ class PGMQueue(BaseQueue):
         message: Dict[str, Any],
         headers: Optional[Dict[str, Any]] = None,
         delay: Union[int, datetime, None] = None,
+        tz: Union[int, datetime, None] = None,  # Backward compatible alias
         conn=None,
     ) -> int:
-        """
-        Send a single message to a queue.
-
-        Args:
-            queue: Target queue name
-            message: Message payload (must be JSON-serializable dict)
-            headers: Optional metadata headers
-            delay: Seconds (int) or future timestamp (datetime) for delayed visibility
-
-        Returns:
-            Message ID (bigint)
-        """
+        """Send a single message to a queue."""
         log_with_context(
             self.logger,
             logging.DEBUG,
             "Sending message",
             queue=queue,
-            has_headers=headers is not None,
-            has_delay=delay is not None,
         )
 
+        # Handle backward compatibility: 'tz' acts as 'delay'
+        effective_delay = tz if tz is not None else delay
+
         has_headers = headers is not None
-        has_delay = delay is not None
-        delay_is_ts = isinstance(delay, datetime)
+        has_delay = effective_delay is not None
+        delay_is_ts = isinstance(effective_delay, datetime)
 
         sql = _sql.get_send_sql(has_headers, has_delay, delay_is_ts)
 
-        # Build parameters
         params: List[Any] = [queue, Jsonb(message)]
         if has_headers:
             params.append(Jsonb(headers))
         if has_delay:
-            params.append(delay)
+            params.append(effective_delay)
 
         result = self._execute_one(sql, tuple(params), conn=conn)
         return result[0] if result else -1
@@ -242,18 +243,7 @@ class PGMQueue(BaseQueue):
         delay: Union[int, datetime, None] = None,
         conn=None,
     ) -> List[int]:
-        """
-        Send multiple messages to a queue.
-
-        Args:
-            queue: Target queue name
-            messages: List of message payloads
-            headers: Optional list of headers (must match messages length)
-            delay: Delay for all messages in batch
-
-        Returns:
-            List of message IDs
-        """
+        """Send multiple messages to a queue."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -274,7 +264,6 @@ class PGMQueue(BaseQueue):
 
         sql = _sql.get_send_batch_sql(has_headers, has_delay, delay_is_ts)
 
-        # Build parameters
         jsonb_messages = [Jsonb(m) for m in messages]
         params: List[Any] = [queue, jsonb_messages]
 
@@ -299,18 +288,7 @@ class PGMQueue(BaseQueue):
         delay: Optional[int] = None,
         conn=None,
     ) -> int:
-        """
-        Send message to all queues matching the routing key pattern.
-
-        Args:
-            routing_key: Dot-separated routing key (e.g., 'logs.api.error')
-            message: Message payload
-            headers: Optional headers
-            delay: Seconds before message becomes visible
-
-        Returns:
-            Number of queues that received the message
-        """
+        """Send message to all queues matching the routing key pattern."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -342,12 +320,7 @@ class PGMQueue(BaseQueue):
         delay: Union[int, datetime, None] = None,
         conn=None,
     ) -> List[BatchTopicResult]:
-        """
-        Send batch of messages to all matching queues.
-
-        Returns:
-            List of results showing which queue received which message ID
-        """
+        """Send batch of messages to all matching queues."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -380,13 +353,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def bind_topic(self, pattern: str, queue_name: str, conn=None) -> None:
-        """
-        Bind a pattern to a queue for topic routing.
-
-        Patterns:
-            * matches exactly one segment (logs.* matches logs.error)
-            # matches zero or more segments (logs.# matches logs.a.b.error)
-        """
+        """Bind a pattern to a queue for topic routing."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -398,12 +365,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def unbind_topic(self, pattern: str, queue_name: str, conn=None) -> bool:
-        """
-        Remove a pattern binding from a queue.
-
-        Returns:
-            True if binding existed and was removed, False otherwise
-        """
+        """Remove a pattern binding from a queue."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -417,9 +379,7 @@ class PGMQueue(BaseQueue):
     def list_topic_bindings(
         self, queue_name: Optional[str] = None, conn=None
     ) -> List[TopicBinding]:
-        """
-        List all topic bindings, optionally filtered by queue.
-        """
+        """List all topic bindings, optionally filtered by queue."""
         if queue_name:
             rows = self._execute_with_result(
                 _sql.LIST_TOPIC_BINDINGS_FOR_QUEUE, (queue_name,), conn=conn
@@ -429,11 +389,7 @@ class PGMQueue(BaseQueue):
         return [TopicBinding.from_row(row) for row in rows]
 
     def test_routing(self, routing_key: str, conn=None) -> List[RoutingResult]:
-        """
-        Test which queues would receive a message without actually sending.
-
-        Useful for debugging routing configurations.
-        """
+        """Test which queues would receive a message without actually sending."""
         rows = self._execute_with_result(_sql.TEST_ROUTING, (routing_key,), conn=conn)
         return [RoutingResult.from_row(row) for row in rows]
 
@@ -450,20 +406,7 @@ class PGMQueue(BaseQueue):
         conditional: Optional[Dict[str, Any]] = None,
         conn=None,
     ) -> Optional[Union[Message, List[Message]]]:
-        """
-        Read message(s) from queue with visibility timeout.
-
-        Args:
-            queue: Queue name
-            vt: Visibility timeout in seconds (default: self.vt)
-            qty: Number of messages to read (1 for single, >1 for batch)
-            conditional: JSON filter for message content (experimental)
-
-        Returns:
-            Single Message if qty=1 and message exists
-            List[Message] if qty>1
-            None if qty=1 and no message available
-        """
+        """Read message(s) from queue with visibility timeout."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -490,6 +433,18 @@ class PGMQueue(BaseQueue):
         return messages
 
     @transaction
+    def read_batch(
+        self, queue: str, vt: Optional[int] = None, batch_size: int = 1, conn=None
+    ) -> List[Message]:
+        """Read a batch of messages (backward compatibility alias)."""
+        result = self.read(queue, vt=vt, qty=batch_size, conn=conn)
+        if result is None:
+            return []
+        if isinstance(result, list):
+            return result
+        return [result]
+
+    @transaction
     def read_with_poll(
         self,
         queue: str,
@@ -500,11 +455,7 @@ class PGMQueue(BaseQueue):
         conditional: Optional[Dict[str, Any]] = None,
         conn=None,
     ) -> List[Message]:
-        """
-        Read messages with long-polling.
-
-        Waits up to max_poll_seconds for messages to become available.
-        """
+        """Read messages with long-polling."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -541,12 +492,7 @@ class PGMQueue(BaseQueue):
     def read_grouped(
         self, queue: str, vt: Optional[int] = None, qty: int = 1, conn=None
     ) -> List[Message]:
-        """
-        Read messages with FIFO grouping (SQS-style batch filling).
-
-        Attempts to fill batch from same message group first for throughput.
-        Messages with same 'x-pgmq-group' header are processed in order.
-        """
+        """Read messages with FIFO grouping (SQS-style batch filling)."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -584,11 +530,7 @@ class PGMQueue(BaseQueue):
     def read_grouped_rr(
         self, queue: str, vt: Optional[int] = None, qty: int = 1, conn=None
     ) -> List[Message]:
-        """
-        Read messages with FIFO round-robin interleaving.
-
-        Fairly distributes messages across different FIFO groups.
-        """
+        """Read messages with FIFO round-robin interleaving."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -632,18 +574,7 @@ class PGMQueue(BaseQueue):
     def pop(
         self, queue: str, qty: int = 1, conn=None
     ) -> Optional[Union[Message, List[Message]]]:
-        """
-        Pop message(s) from queue (read and immediately delete).
-
-        Warning: This provides at-most-once delivery semantics.
-        If processing fails after pop, the message is lost.
-
-        Args:
-            qty: Number of messages to pop
-
-        Returns:
-            Single Message if qty=1, List[Message] if qty>1, None if empty
-        """
+        """Pop message(s) from queue (read and immediately delete)."""
         log_with_context(
             self.logger, logging.DEBUG, "Popping messages", queue=queue, qty=qty
         )
@@ -660,12 +591,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def delete(self, queue: str, msg_id: int, conn=None) -> bool:
-        """
-        Delete a single message from queue.
-
-        Returns:
-            True if message was deleted, False if not found
-        """
+        """Delete a single message from queue."""
         log_with_context(
             self.logger, logging.DEBUG, "Deleting message", queue=queue, msg_id=msg_id
         )
@@ -674,12 +600,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def delete_batch(self, queue: str, msg_ids: List[int], conn=None) -> List[int]:
-        """
-        Delete multiple messages.
-
-        Returns:
-            List of message IDs that were actually deleted (may be subset)
-        """
+        """Delete multiple messages."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -692,12 +613,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def archive(self, queue: str, msg_id: int, conn=None) -> bool:
-        """
-        Archive a single message (remove from queue, add to archive table).
-
-        Returns:
-            True if message was archived, False if not found
-        """
+        """Archive a single message."""
         log_with_context(
             self.logger, logging.DEBUG, "Archiving message", queue=queue, msg_id=msg_id
         )
@@ -706,12 +622,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def archive_batch(self, queue: str, msg_ids: List[int], conn=None) -> List[int]:
-        """
-        Archive multiple messages.
-
-        Returns:
-            List of message IDs that were actually archived
-        """
+        """Archive multiple messages."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -726,12 +637,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def purge(self, queue: str, conn=None) -> int:
-        """
-        Delete all messages from queue.
-
-        Returns:
-            Number of messages deleted
-        """
+        """Purge all messages from queue."""
         log_with_context(self.logger, logging.DEBUG, "Purging queue", queue=queue)
         result = self._execute_one(_sql.PURGE_QUEUE, (queue,), conn=conn)
         return result[0] if result else 0
@@ -748,16 +654,7 @@ class PGMQueue(BaseQueue):
         vt: Union[int, datetime],
         conn=None,
     ) -> Optional[Union[Message, List[Message]]]:
-        """
-        Set visibility timeout for message(s).
-
-        Args:
-            msg_id: Single ID or list of IDs
-            vt: Seconds from now (int) or absolute timestamp (datetime)
-
-        Returns:
-            Updated message(s) with new visibility timeout
-        """
+        """Set visibility timeout for message(s)."""
         is_batch = isinstance(msg_id, list)
 
         log_with_context(
@@ -808,12 +705,7 @@ class PGMQueue(BaseQueue):
     def enable_notify(
         self, queue: str, throttle_interval_ms: int = 250, conn=None
     ) -> None:
-        """
-        Enable PostgreSQL NOTIFY for new message insertions.
-
-        Args:
-            throttle_interval_ms: Minimum ms between notifications (0 to disable)
-        """
+        """Enable PostgreSQL NOTIFY for new message insertions."""
         log_with_context(
             self.logger,
             logging.DEBUG,
@@ -905,11 +797,7 @@ class PGMQueue(BaseQueue):
 
     @transaction
     def detach_archive(self, queue: str, conn=None) -> None:
-        """
-        Detach archive table from extension (deprecated in PGMQ v2.0, no-op).
-
-        Kept for backward compatibility.
-        """
+        """Detach archive table from extension (deprecated in PGMQ v2.0)."""
         log_with_context(
             self.logger, logging.DEBUG, "Detaching archive (deprecated)", queue=queue
         )
