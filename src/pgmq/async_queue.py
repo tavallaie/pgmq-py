@@ -221,8 +221,7 @@ class PGMQueue(BaseQueue):
 
     async def validate_queue_name(self, queue_name: str, conn=None) -> bool:
         """Validate queue name format. Raises exception if invalid."""
-        await self._execute(_sql.VALIDATE_QUEUE_NAME, (queue_name,), conn=conn)
-        return True
+    async def validate_queue_name(self, queue_name: str, conn=None) -> None:
 
     # =========================================================================
     # Sending Messages
