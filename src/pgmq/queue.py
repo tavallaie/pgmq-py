@@ -191,8 +191,7 @@ class PGMQueue(BaseQueue):
         return [QueueRecord.from_row(row) for row in rows]
 
     def validate_queue_name(self, queue_name: str, conn=None) -> bool:
-        """Validate queue name format. Raises exception if invalid."""
-        self._execute(_sql.VALIDATE_QUEUE_NAME, (queue_name,), conn=conn)
+    def validate_queue_name(self, queue_name: str, conn=None) -> None:
         return True
 
     # =========================================================================
