@@ -21,7 +21,7 @@ except ImportError:
 
 class LoggingManager:
     """
-    Centralized logging manager for PGMQueue with dual backend support.
+    Centralized logging manager for PGMqueue with dual backend support.
 
     Provides a unified interface for both standard library logging and loguru,
     with automatic backend detection and backward compatibility with existing
@@ -31,8 +31,7 @@ class LoggingManager:
     _configured_loggers: Dict[str, Any] = {}
     _loguru_handler_ids: Set[int] = set()
     _use_loguru: bool = LOGURU_AVAILABLE
-
-    _handler_ids: Set[int] = set()
+    _configured: bool = False
 
     @classmethod
     def get_logger(
@@ -48,35 +47,24 @@ class LoggingManager:
         structured: bool = False,
         rotation: Optional[str] = None,
         retention: Optional[str] = None,
+        compression: Optional[str] = None,
     ) -> Union[logging.Logger, Any]:
         """
         Retrieve or create a configured logger instance.
 
         Returns cached logger if name exists. Otherwise creates new logger
         using detected backend (loguru preferred if available).
-
-        Args:
-            name: Unique identifier for the logger instance.
-            verbose: Enable DEBUG level output; defaults to WARNING.
-            log_filename: Path for file output; auto-generated if verbose=True.
-            log_format: Override default message format string.
-            log_level: Explicit level override (int for stdlib, str for loguru).
-            enable_rotation: Activate RotatingFileHandler (stdlib only).
-            max_bytes: Rotation trigger size in bytes (stdlib only).
-            backup_count: Number of archived log files to retain (stdlib only).
-            structured: Output JSON format instead of plain text.
-            rotation: Rotation policy expression (loguru only, e.g., "10 MB").
-            retention: Archive cleanup policy (loguru only, e.g., "1 week").
-            compression: Archive compression format (loguru only, e.g., "gz").
-
-        Returns:
-            Configured logger compatible with the active backend.
         """
-        if name in cls._loggers:
-            return cls._loggers[name]
+        # Create a cache key based on configuration to avoid mixing configs
+        cache_key = (
+            f"{name}:{verbose}:{log_filename}:{structured}:{rotation}:{retention}"
+        )
+
+        if cache_key in cls._configured_loggers:
+            return cls._configured_loggers[cache_key]
 
         if cls._use_loguru:
-            logger = cls._get_loguru_logger(
+            logger = cls._configure_loguru(
                 name=name,
                 verbose=verbose,
                 log_filename=log_filename,
@@ -89,7 +77,15 @@ class LoggingManager:
             )
         else:
             logger = cls._configure_stdlib(
-                name, verbose, log_filename, structured, bool(rotation)
+                name=name,
+                verbose=verbose,
+                log_filename=log_filename,
+                log_format=log_format,
+                log_level=log_level,
+                structured=structured,
+                enable_rotation=enable_rotation,
+                max_bytes=max_bytes,
+                backup_count=backup_count,
             )
 
         cls._configured_loggers[cache_key] = logger
@@ -101,56 +97,69 @@ class LoggingManager:
         if not LOGURU_AVAILABLE or not cls._use_loguru:
             return
 
-        ids_to_remove = list(cls._handler_ids)
+        ids_to_remove = list(cls._loguru_handler_ids)
         for handler_id in ids_to_remove:
             try:
                 loguru_logger.remove(handler_id)
-                cls._handler_ids.discard(handler_id)
+                cls._loguru_handler_ids.discard(handler_id)
             except Exception:
-                # Handler already removed or invalid; clean up tracking set
-                cls._handler_ids.discard(handler_id)
+                cls._loguru_handler_ids.discard(handler_id)
 
     @classmethod
-    def _get_standard_logger(
+    def _configure_stdlib(
         cls,
         name: str,
         verbose: bool,
         log_filename: Optional[str],
+        log_format: Optional[str],
+        log_level: Optional[Union[int, str]],
         structured: bool,
         enable_rotation: bool,
+        max_bytes: int,
+        backup_count: int,
     ) -> logging.Logger:
         """Configure and return a standard library Logger instance."""
         logger = logging.getLogger(name)
 
+        # Return existing if already configured (standard behavior)
+        # To force reconfiguration, logger.handlers could be cleared, but usually risky
         if logger.handlers:
             return logger
 
+        # Set Level
         if log_level is not None:
-            logger.setLevel(log_level)
+            if isinstance(log_level, str):
+                level = getattr(logging, log_level.upper(), logging.WARNING)
+                logger.setLevel(level)
+            else:
+                logger.setLevel(log_level)
         elif verbose:
             logger.setLevel(logging.DEBUG)
         else:
             logger.setLevel(logging.WARNING)
 
+        # Set Format
         if log_format is None:
             if structured:
                 log_format = '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "logger": "%(name)s", "message": "%(message)s"}'
             else:
                 log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-        formatter = logging.Formatter(fmt)
+        formatter = logging.Formatter(log_format)
 
+        # Console Handler
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 
+        # File Handler
         if verbose or log_filename:
             filename = log_filename or datetime.now().strftime("pgmq_%Y%m%d_%H%M%S.log")
             filepath = os.path.join(os.getcwd(), filename)
 
             if enable_rotation:
                 file_handler = logging.handlers.RotatingFileHandler(
-                    filepath, maxBytes=10 * 1024 * 1024, backupCount=5
+                    filepath, maxBytes=max_bytes, backupCount=backup_count
                 )
             else:
                 file_handler = logging.FileHandler(filepath)
@@ -166,17 +175,16 @@ class LoggingManager:
         name: str,
         verbose: bool,
         log_filename: Optional[str],
+        log_format: Optional[str],
+        log_level: Optional[Union[int, str]],
         structured: bool,
         rotation: Optional[str],
         retention: Optional[str],
+        compression: Optional[str],
     ) -> Any:
         """
         Configure and return a loguru logger instance.
-
-        When verbose=False and no log_filename specified, returns a bound
-        logger without adding handlers to avoid polluting host application logs.
         """
-
         effective_level = "DEBUG" if verbose else "WARNING"
         if log_level is not None:
             if isinstance(log_level, int):
@@ -195,14 +203,15 @@ class LoggingManager:
             if structured:
                 log_format = '{{"timestamp": "{time:YYYY-MM-DD HH:mm:ss.SSS}", "level": "{level}", "logger": "{extra[logger]}", "message": "{message}"}}'
             else:
-                # Omit {extra[logger]} to prevent KeyError when host app logs without context
                 log_format = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
 
         needs_custom_handler = bool(verbose or log_filename)
 
         if needs_custom_handler:
+            # Remove previous handlers to avoid duplication in interactive sessions
             cls._remove_pgmq_handlers()
 
+            # Console Handler
             console_id = loguru_logger.add(
                 sys.stderr,
                 format=log_format,
@@ -211,27 +220,23 @@ class LoggingManager:
                 backtrace=True,
                 diagnose=True,
             )
-            cls._handler_ids.add(console_id)
+            cls._loguru_handler_ids.add(console_id)
 
-            if log_filename is None:
-                log_filename = datetime.now().strftime("pgmq_debug_%Y%m%d_%H%M%S.log")
+            # File Handler
+            if log_filename:
+                filepath = os.path.join(os.getcwd(), log_filename)
+                file_id = loguru_logger.add(
+                    filepath,
+                    format=log_format,
+                    level=effective_level,
+                    rotation=rotation or "10 MB",
+                    retention=retention or "1 week",
+                    compression=compression,
+                    enqueue=True,
+                )
+                cls._loguru_handler_ids.add(file_id)
 
-            # File handler
-            filename = log_filename or datetime.now().strftime("pgmq_%Y%m%d_%H%M%S.log")
-            filepath = os.path.join(os.getcwd(), filename)
-
-            file_id = loguru_logger.add(
-                log_path,
-                format=log_format,
-                level=effective_level,
-                rotation=rotation or "10 MB",
-                retention=retention or "1 week",
-                enqueue=True,
-            )
-            cls._handler_ids.add(file_id)
-
-        logger = loguru_logger.bind(logger=name)
-        return logger
+        return loguru_logger.bind(logger=name)
 
     @classmethod
     def configure_global_logging(
@@ -243,14 +248,6 @@ class LoggingManager:
     ) -> None:
         """
         Apply global logging configuration across all PGMQ loggers.
-
-        Modifies class-level defaults and configures root handlers.
-
-        Args:
-            log_level: Default severity threshold for all loggers.
-            log_format: Default output format template.
-            structured: Enable JSON output for all loggers.
-            use_loguru: Force specific backend (None enables auto-detection).
         """
         cls._configured = True
 
@@ -260,9 +257,7 @@ class LoggingManager:
         if cls._use_loguru:
             cls._remove_pgmq_handlers()
 
-            if log_level is None:
-                log_level = "INFO"
-            elif isinstance(log_level, int):
+            if isinstance(log_level, int):
                 level_map = {
                     logging.DEBUG: "DEBUG",
                     logging.INFO: "INFO",
@@ -276,32 +271,21 @@ class LoggingManager:
                 if structured:
                     log_format = '{{"timestamp": "{time:YYYY-MM-DD HH:mm:ss.SSS}", "level": "{level}", "logger": "{extra[logger]}", "message": "{message}"}}'
                 else:
-                    # Also omit {extra[logger]} here to prevent KeyError in host applications
-                    # Users can override with custom log_format if they need logger names
                     log_format = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
 
             handler_id = loguru_logger.add(
                 sys.stderr, format=log_format, level=log_level, enqueue=True
             )
-            cls._handler_ids.add(handler_id)
+            cls._loguru_handler_ids.add(handler_id)
         else:
             root_logger = logging.getLogger("pgmq")
             root_logger.setLevel(log_level)
-
-
-def create_logger(
-    name: str,
-    verbose: bool = False,
-    log_filename: Optional[str] = None,
-) -> Union[logging.Logger, Any]:
-    """
-    Backward-compatible logger factory.
-
             if not any(
                 isinstance(h, logging.StreamHandler) for h in root_logger.handlers
             ):
                 console_handler = logging.StreamHandler()
-                console_handler.setFormatter(formatter)
+                if log_format:
+                    console_handler.setFormatter(logging.Formatter(log_format))
                 root_logger.addHandler(console_handler)
 
     @classmethod
@@ -314,14 +298,6 @@ def create_logger(
     ) -> None:
         """
         Emit a log entry with structured context data.
-
-        Automatically adapts output format for active backend.
-
-        Args:
-            logger: Target logger instance.
-            level: Severity level (int for stdlib, str for loguru).
-            message: Primary log message content.
-            **context: Key-value pairs to include in log output.
         """
         if cls._use_loguru:
             if context:
@@ -343,12 +319,10 @@ def create_logger(
                 context_str = " | ".join([f"{k}={v}" for k, v in context.items()])
                 message = f"{message} | {context_str}"
 
-    Automatically adapts to logger type (stdlib vs loguru).
-    """
-    # Check if loguru (has bind method)
-    if hasattr(logger, "bind") and callable(getattr(logger, "bind")):
-        # Loguru style
-        bound = logger.bind(**context) if context else logger
+            if isinstance(level, str):
+                level = getattr(logging, level.upper(), logging.INFO)
+
+            logger.log(level, message)
 
     @classmethod
     def log_transaction_start(
@@ -404,18 +378,21 @@ def create_logger(
 ) -> Union[logging.Logger, Any]:
     """
     Factory function for backward-compatible logger creation.
-
-    Simplified interface matching legacy PGMQueue API.
-
-    Args:
-        name: Logger identifier.
-        verbose: Enable debug output.
-        log_filename: Optional file output path.
-
-    Returns:
-        Configured logger instance.
     """
-    return PGMQLogger.get_logger(name=name, verbose=verbose, log_filename=log_filename)
+    return LoggingManager.get_logger(
+        name=name, verbose=verbose, log_filename=log_filename
+    )
+
+
+def log_with_context(
+    logger: Union[logging.Logger, Any], level: int, message: str, **context: Any
+) -> None:
+    """
+    Emit log entry with structured context.
+
+    Automatically adapts to logger type (stdlib vs loguru).
+    """
+    LoggingManager.log_with_context(logger, level, message, **context)
 
 
 def log_performance(logger: Union[logging.Logger, Any]):
