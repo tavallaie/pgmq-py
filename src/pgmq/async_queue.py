@@ -1,4 +1,3 @@
-# src/pgmq/async_queue.py
 """
 Asynchronous PGMQ client implementation.
 
@@ -6,14 +5,17 @@ This module provides the async PGMQueue class using asyncpg for high-performance
 asyncio-based database operations.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
-
+import os
+import logging
+import warnings
 import asyncpg
 from asyncpg import Pool
+import orjson  # Required for JSON serialization
 
-from pgmq.base import BaseQueue
+from pgmq.base import BaseQueue, PGMQConfig
 from pgmq import _sql
 from pgmq.decorators import async_transaction
 from pgmq.logger import log_with_context
@@ -26,46 +28,86 @@ from pgmq.messages import (
     BatchTopicResult,
     NotificationThrottle,
 )
-import logging
 
 
 def _parse_jsonb(val) -> Any:
     """Parse asyncpg JSONB value."""
     if val is None:
         return None
-    # asyncpg returns dict/list directly for jsonb
+    # asyncpg often returns JSONB as a string or bytes depending on schema
+    if isinstance(val, (str, bytes)):
+        return orjson.loads(val)
+    # If it's already a dict/list, return as is
     return val
+
+
+def _convert_sql(sql: str) -> str:
+    """
+    Convert psycopg style SQL (%s) to asyncpg style ($1, $2...).
+    """
+    count = sql.count("%s")
+    if count == 0:
+        return sql
+
+    parts = sql.split("%s")
+    result = []
+    for i, part in enumerate(parts[:-1]):
+        result.append(part)
+        result.append(f"${i + 1}")
+    result.append(parts[-1])
+    return "".join(result)
 
 
 @dataclass
 class PGMQueue(BaseQueue):
     """
     Asynchronous PGMQueue client for PostgreSQL Message Queue operations.
-
-    This class provides the same functionality as the sync PGMQueue but for
-    async/await patterns. Initialization requires calling init() after construction.
-
-    Example:
-        >>> from pgmq import AsyncPGMQueue
-        >>> queue = AsyncPGMQueue(host="localhost", database="mydb")
-        >>> await queue.init()
-        >>> await queue.create_queue("my_queue")
-        >>> msg_id = await queue.send("my_queue", {"hello": "world"})
-        >>> msg = await queue.read("my_queue", vt=30)
     """
 
-    pool: Optional[Pool] = None
+    # --- Backward Compatible Fields ---
+    host: str = field(default_factory=lambda: os.getenv("PG_HOST", "localhost"))
+    port: str = field(default_factory=lambda: os.getenv("PG_PORT", "5432"))
+    database: str = field(default_factory=lambda: os.getenv("PG_DATABASE", "postgres"))
+    username: str = field(default_factory=lambda: os.getenv("PG_USERNAME", "postgres"))
+    password: str = field(default_factory=lambda: os.getenv("PG_PASSWORD", "postgres"))
+    delay: int = 0
+    vt: int = 30
+    pool_size: int = 10
+    verbose: bool = False
+    log_filename: Optional[str] = None
+    init_extension: bool = True
+    structured_logging: bool = False
+    log_rotation: bool = False
+    log_rotation_size: str = "10 MB"
+    log_retention: str = "1 week"
 
-    async def init(self) -> None:
-        """
-        Initialize the asyncpg connection pool.
+    # --- Internal Fields ---
+    pool: Optional[Pool] = field(init=False, default=None)
 
-        Must be called before any other operations.
-        """
+    def __post_init__(self) -> None:
+        """Initialize configuration after dataclass construction."""
+        self.config = PGMQConfig(
+            host=self.host,
+            port=self.port,
+            database=self.database,
+            username=self.username,
+            password=self.password,
+            delay=self.delay,
+            vt=self.vt,
+            pool_size=self.pool_size,
+            verbose=self.verbose,
+            log_filename=self.log_filename,
+            init_extension=self.init_extension,
+            structured_logging=self.structured_logging,
+            log_rotation=self.log_rotation,
+            log_rotation_size=self.log_rotation_size,
+            log_retention=self.log_retention,
+        )
         super().__init__(config=self.config)
 
+    async def init(self) -> None:
+        """Initialize the asyncpg connection pool."""
         log_with_context(self.logger, logging.DEBUG, "Creating asyncpg pool")
-
         self.pool = await asyncpg.create_pool(
             self.config.async_dsn,
             min_size=1,
@@ -90,6 +132,7 @@ class PGMQueue(BaseQueue):
         self, sql: str, params: Optional[tuple] = None, conn=None
     ) -> None:
         """Execute SQL without returning results."""
+        sql = _convert_sql(sql)
         if conn:
             await conn.execute(sql, *params if params else ())
         else:
@@ -100,6 +143,7 @@ class PGMQueue(BaseQueue):
         self, sql: str, params: Optional[tuple] = None, conn=None
     ) -> List[tuple]:
         """Execute SQL and return all results."""
+        sql = _convert_sql(sql)
         if conn:
             return await conn.fetch(sql, *params if params else ())
         else:
@@ -152,18 +196,32 @@ class PGMQueue(BaseQueue):
         return result[0] if result else False
 
     async def list_queues(self, conn=None) -> List[QueueRecord]:
-        """List all queues."""
+        """
+        List all queues with their metadata.
+
+        .. versionchanged:: 2.0.0
+            This method now returns a list of :class:`QueueRecord` objects
+            instead of a list of strings. To get the queue name, access the
+            ``queue_name`` attribute of the returned object.
+
+        Returns:
+            List[QueueRecord]: A list of queue metadata objects.
+        """
         log_with_context(self.logger, logging.DEBUG, "Listing queues")
+        warnings.warn(
+            "list_queues() now returns List[QueueRecord] instead of List[str]. "
+            "Access the queue name via the .queue_name attribute. "
+            "This warning will be removed in a future version.",
+            UserWarning,
+            stacklevel=2,
+        )
         rows = await self._execute_with_result(_sql.LIST_QUEUES, conn=conn)
         return [QueueRecord.from_row(row) for row in rows]
 
     async def validate_queue_name(self, queue_name: str, conn=None) -> bool:
-        """Validate queue name format."""
-        try:
-            await self._execute(_sql.VALIDATE_QUEUE_NAME, (queue_name,), conn=conn)
-            return True
-        except Exception:
-            return False
+        """Validate queue name format. Raises exception if invalid."""
+        await self._execute(_sql.VALIDATE_QUEUE_NAME, (queue_name,), conn=conn)
+        return True
 
     # =========================================================================
     # Sending Messages
@@ -176,22 +234,30 @@ class PGMQueue(BaseQueue):
         message: Dict[str, Any],
         headers: Optional[Dict[str, Any]] = None,
         delay: Union[int, datetime, None] = None,
+        tz: Union[int, datetime, None] = None,  # Backward compatible alias
         conn=None,
     ) -> int:
         """Send a single message."""
         log_with_context(self.logger, logging.DEBUG, "Sending message", queue=queue)
 
+        # Handle backward compatibility: 'tz' acts as 'delay'
+        effective_delay = tz if tz is not None else delay
+
         has_headers = headers is not None
-        has_delay = delay is not None
-        delay_is_ts = isinstance(delay, datetime)
+        has_delay = effective_delay is not None
+        delay_is_ts = isinstance(effective_delay, datetime)
 
         sql = _sql.get_send_sql(has_headers, has_delay, delay_is_ts)
 
-        params: List[Any] = [queue, message]  # asyncpg handles JSONB conversion
+        # asyncpg requires explicit JSON serialization for dicts
+        msg_str = orjson.dumps(message).decode("utf-8")
+
+        params: List[Any] = [queue, msg_str]
         if has_headers:
-            params.append(headers)
+            headers_str = orjson.dumps(headers).decode("utf-8")
+            params.append(headers_str)
         if has_delay:
-            params.append(delay)
+            params.append(effective_delay)
 
         result = await self._execute_one(sql, tuple(params), conn=conn)
         return result[0] if result else -1
@@ -226,9 +292,13 @@ class PGMQueue(BaseQueue):
 
         sql = _sql.get_send_batch_sql(has_headers, has_delay, delay_is_ts)
 
-        params: List[Any] = [queue, messages]  # asyncpg handles arrays
+        # asyncpg requires explicit JSON serialization
+        msgs_str = [orjson.dumps(m).decode("utf-8") for m in messages]
+
+        params: List[Any] = [queue, msgs_str]
         if has_headers:
-            params.append(headers)
+            headers_str = [orjson.dumps(h).decode("utf-8") for h in headers]
+            params.append(headers_str)
         if has_delay:
             params.append(delay)
 
@@ -258,9 +328,12 @@ class PGMQueue(BaseQueue):
 
         sql = _sql.get_send_topic_sql(has_headers, has_delay)
 
-        params: List[Any] = [routing_key, message]
+        msg_str = orjson.dumps(message).decode("utf-8")
+        params: List[Any] = [routing_key, msg_str]
+
         if has_headers:
-            params.append(headers)
+            headers_str = orjson.dumps(headers).decode("utf-8")
+            params.append(headers_str)
         if has_delay:
             params.append(delay)
 
@@ -294,11 +367,14 @@ class PGMQueue(BaseQueue):
 
         sql = _sql.get_send_batch_topic_sql(has_headers, has_delay, delay_is_ts)
 
-        params: List[Any] = [routing_key, messages]
+        msgs_str = [orjson.dumps(m).decode("utf-8") for m in messages]
+        params: List[Any] = [routing_key, msgs_str]
+
         if has_headers:
             if headers and len(headers) != len(messages):
                 raise ValueError("headers list must match messages list length")
-            params.append(headers)
+            headers_str = [orjson.dumps(h).decode("utf-8") for h in headers]
+            params.append(headers_str)
         if has_delay:
             params.append(delay)
 
@@ -364,7 +440,7 @@ class PGMQueue(BaseQueue):
         conditional: Optional[Dict[str, Any]] = None,
         conn=None,
     ) -> Optional[Union[Message, List[Message]]]:
-        """Read messages from queue."""
+        """Read message(s) from queue."""
         log_with_context(
             self.logger, logging.DEBUG, "Reading messages", queue=queue, qty=qty
         )
@@ -373,7 +449,8 @@ class PGMQueue(BaseQueue):
 
         if conditional:
             sql = _sql.READ_CONDITIONAL
-            params = (queue, actual_vt, qty, conditional)
+            cond_str = orjson.dumps(conditional).decode("utf-8")
+            params = (queue, actual_vt, qty, cond_str)
         else:
             sql = _sql.READ
             params = (queue, actual_vt, qty)
@@ -384,6 +461,17 @@ class PGMQueue(BaseQueue):
         if qty == 1:
             return messages[0] if messages else None
         return messages
+
+    async def read_batch(
+        self, queue: str, vt: Optional[int] = None, batch_size: int = 1, conn=None
+    ) -> List[Message]:
+        """Read a batch of messages (backward compatibility alias)."""
+        result = await self.read(queue, vt=vt, qty=batch_size, conn=conn)
+        if result is None:
+            return []
+        if isinstance(result, list):
+            return result
+        return [result]
 
     @async_transaction
     async def read_with_poll(
@@ -405,13 +493,14 @@ class PGMQueue(BaseQueue):
 
         if conditional:
             sql = _sql.READ_WITH_POLL_CONDITIONAL
+            cond_str = orjson.dumps(conditional).decode("utf-8")
             params = (
                 queue,
                 actual_vt,
                 qty,
                 max_poll_seconds,
                 poll_interval_ms,
-                conditional,
+                cond_str,
             )
         else:
             sql = _sql.READ_WITH_POLL
@@ -603,6 +692,12 @@ class PGMQueue(BaseQueue):
         else:
             sql = _sql.SET_VT
             params = (queue, msg_id, vt)
+
+        # Fix Ambiguous Function Error: explicit type cast
+        if isinstance(vt, datetime):
+            sql = sql.replace("vt=>%s)", "vt=>%s::timestamptz)")
+        else:
+            sql = sql.replace("vt=>%s)", "vt=>%s::integer)")
 
         rows = await self._execute_with_result(sql, params, conn=conn)
         messages = [Message.from_row(row, _parse_jsonb) for row in rows]
