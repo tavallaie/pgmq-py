@@ -1,3 +1,4 @@
+# src/pgmq/base.py
 """
 Base configuration and shared utilities for PGMQ clients.
 """

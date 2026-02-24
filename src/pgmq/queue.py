@@ -1,3 +1,4 @@
+# src/pgmq/queue.py
 """
 Synchronous PGMQ client implementation.
 

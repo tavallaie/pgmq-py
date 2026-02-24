@@ -1,3 +1,4 @@
+# src/pgmq/logger.py
 """
 Centralized logging management for PGMQ.
 
