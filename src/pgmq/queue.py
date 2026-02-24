@@ -657,6 +657,7 @@ class PGMQueue(BaseQueue):
     ) -> Optional[Union[Message, List[Message]]]:
         """Set visibility timeout for message(s)."""
         is_batch = isinstance(msg_id, list)
+        vt_is_timestamp = isinstance(vt, datetime)
 
         log_with_context(
             self.logger,
@@ -666,12 +667,9 @@ class PGMQueue(BaseQueue):
             is_batch=is_batch,
         )
 
-        if is_batch:
-            sql = _sql.SET_VT_BATCH
-            params = (queue, msg_id, vt)
-        else:
-            sql = _sql.SET_VT
-            params = (queue, msg_id, vt)
+        # Robust SQL selection using helper
+        sql = _sql.get_set_vt_sql(is_batch, vt_is_timestamp)
+        params = (queue, msg_id, vt)
 
         rows = self._execute_with_result(sql, params, conn=conn)
         messages = [Message.from_row(row, lambda x: x) for row in rows]

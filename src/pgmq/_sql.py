@@ -131,11 +131,18 @@ PURGE_QUEUE = "SELECT pgmq.purge_queue(queue_name=>%s);"
 # Visibility Timeout
 # ============================================================================
 
-SET_VT = """SELECT msg_id, read_ct, enqueued_at, last_read_at, vt, message, headers 
-            FROM pgmq.set_vt(queue_name=>%s::text, msg_id=>%s::bigint, vt=>%s);"""
+# Explicit templates to avoid ambiguous function errors
+SET_VT_INT = """SELECT msg_id, read_ct, enqueued_at, last_read_at, vt, message, headers 
+                FROM pgmq.set_vt(queue_name=>%s::text, msg_id=>%s::bigint, vt=>%s::integer);"""
 
-SET_VT_BATCH = """SELECT msg_id, read_ct, enqueued_at, last_read_at, vt, message, headers 
-                  FROM pgmq.set_vt(queue_name=>%s::text, msg_ids=>%s::bigint[], vt=>%s);"""
+SET_VT_TZ = """SELECT msg_id, read_ct, enqueued_at, last_read_at, vt, message, headers 
+               FROM pgmq.set_vt(queue_name=>%s::text, msg_id=>%s::bigint, vt=>%s::timestamptz);"""
+
+SET_VT_BATCH_INT = """SELECT msg_id, read_ct, enqueued_at, last_read_at, vt, message, headers 
+                      FROM pgmq.set_vt(queue_name=>%s::text, msg_ids=>%s::bigint[], vt=>%s::integer);"""
+
+SET_VT_BATCH_TZ = """SELECT msg_id, read_ct, enqueued_at, last_read_at, vt, message, headers 
+                     FROM pgmq.set_vt(queue_name=>%s::text, msg_ids=>%s::bigint[], vt=>%s::timestamptz);"""
 
 # ============================================================================
 # Metrics
@@ -242,3 +249,10 @@ def get_send_batch_topic_sql(
             else SEND_BATCH_TOPIC_WITH_DELAY_INT
         )
     return SEND_BATCH_TOPIC
+
+
+def get_set_vt_sql(is_batch: bool = False, vt_is_timestamp: bool = False) -> str:
+    """Get appropriate set_vt SQL based on parameters."""
+    if is_batch:
+        return SET_VT_BATCH_TZ if vt_is_timestamp else SET_VT_BATCH_INT
+    return SET_VT_TZ if vt_is_timestamp else SET_VT_INT

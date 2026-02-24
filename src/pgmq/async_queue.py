@@ -682,23 +682,16 @@ class PGMQueue(BaseQueue):
     ) -> Optional[Union[Message, List[Message]]]:
         """Set visibility timeout."""
         is_batch = isinstance(msg_id, list)
+        vt_is_timestamp = isinstance(vt, datetime)
 
         log_with_context(
             self.logger, logging.DEBUG, "Setting VT", queue=queue, is_batch=is_batch
         )
 
-        if is_batch:
-            sql = _sql.SET_VT_BATCH
-            params = (queue, msg_id, vt)
-        else:
-            sql = _sql.SET_VT
-            params = (queue, msg_id, vt)
+        # Robust SQL selection using helper
+        sql = _sql.get_set_vt_sql(is_batch, vt_is_timestamp)
 
-        # Fix Ambiguous Function Error: explicit type cast
-        if isinstance(vt, datetime):
-            sql = sql.replace("vt=>%s)", "vt=>%s::timestamptz)")
-        else:
-            sql = sql.replace("vt=>%s)", "vt=>%s::integer)")
+        params = (queue, msg_id, vt)
 
         rows = await self._execute_with_result(sql, params, conn=conn)
         messages = [Message.from_row(row, _parse_jsonb) for row in rows]
