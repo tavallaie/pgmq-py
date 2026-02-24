@@ -372,7 +372,7 @@ class PGMQueue(BaseQueue):
         params: List[Any] = [routing_key, msgs_str]
 
         if has_headers:
-            if headers and len(headers) != len(messages):
+            if len(headers) != len(messages):
                 raise ValueError("headers list must match messages list length")
             headers_str = [orjson.dumps(h).decode("utf-8") for h in headers]
             params.append(headers_str)
