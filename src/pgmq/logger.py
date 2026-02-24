@@ -283,8 +283,9 @@ class LoggingManager:
                 isinstance(h, logging.StreamHandler) for h in root_logger.handlers
             ):
                 console_handler = logging.StreamHandler()
-                if log_format:
-                    console_handler.setFormatter(logging.Formatter(log_format))
+                console_handler = logging.StreamHandler()
+                formatter = logging.Formatter(log_format or "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+                console_handler.setFormatter(formatter)
                 root_logger.addHandler(console_handler)
 
     @classmethod
