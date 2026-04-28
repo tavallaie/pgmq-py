@@ -11,6 +11,7 @@ from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 import os
 import logging
+import urllib.parse
 import json
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, async_sessionmaker
 from sqlalchemy.pool import AsyncAdaptedQueuePool
@@ -157,8 +158,10 @@ class PGMQueue(BaseQueue):
             return
 
         log_with_context(self.logger, logging.DEBUG, "Creating async SQLAlchemy engine")
+        user = urllib.parse.quote_plus(self.config.username)
+        password = urllib.parse.quote_plus(self.config.password)
         connection_url = (
-            f"postgresql+asyncpg://{self.config.username}:{self.config.password}@"
+            f"postgresql+asyncpg://{user}:{password}@"
             f"{self.config.host}:{self.config.port}/{self.config.database}"
         )
         self.engine = create_async_engine(

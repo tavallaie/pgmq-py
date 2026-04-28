@@ -131,8 +131,10 @@ class PGMQConfig:
     @property
     def async_dsn(self) -> str:
         """Build asyncpg-compatible connection string (URI format)."""
+        user = urllib.parse.quote_plus(self.username)
+        password = urllib.parse.quote_plus(self.password)
         return (
-            f"postgresql://{self.username}:{self.password}@"
+            f"postgresql://{user}:{password}@"
             f"{self.host}:{self.port}/{self.database}"
         )
 

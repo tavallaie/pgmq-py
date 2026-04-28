@@ -12,6 +12,7 @@ from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 import os
 import logging
+import urllib.parse
 import warnings
 import json
 from sqlalchemy import create_engine, text, Engine
@@ -154,8 +155,10 @@ class PGMQueue(BaseQueue):
     def _init_engine(self) -> None:
         """Initialize the SQLAlchemy engine."""
         log_with_context(self.logger, logging.DEBUG, "Creating SQLAlchemy engine")
+        user = urllib.parse.quote_plus(self.config.username)
+        password = urllib.parse.quote_plus(self.config.password)
         connection_url = (
-            f"postgresql+psycopg://{self.config.username}:{self.config.password}@"
+            f"postgresql+psycopg://{user}:{password}@"
             f"{self.config.host}:{self.config.port}/{self.config.database}"
         )
         self.engine = create_engine(
